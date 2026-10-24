@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Node.js
+node_modules/
+dist/
+
+# Rust / Tauri
+target/
+src-tauri/target/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.key
+
+# Local sensitive data
+data/
+vaults/
+
+# Frontend build/cache
+**/node_modules/
+**/dist/
+**/.vite/
+
+# Rust build
+**/target/
+
+# Python environments
+**/.venv/
+**/__pycache__/
+
+# OS / editor
+.DS_Store
+.idea/
