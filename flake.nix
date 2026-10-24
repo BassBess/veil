@@ -18,6 +18,14 @@
           pkg-config
           git
           gh
+          gcc
+          gnumake
+          openssl
+          glib
+          gtk3
+          webkitgtk_4_1
+          librsvg
+          wrapGAppsHook4
         ];
 
         shellHook = ''
