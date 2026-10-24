@@ -17,6 +17,7 @@
           cargo
           pkg-config
           git
+          gh
         ];
 
         shellHook = ''
