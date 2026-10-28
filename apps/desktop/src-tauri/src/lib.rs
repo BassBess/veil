@@ -3,12 +3,14 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[tauri::command]
-fn detect_pii(text: String) -> Result<serde_json::Value, String> {
+fn detect_pii(
+    text: String,
+    entities: Vec<String>,
+) -> Result<serde_json::Value, String> {
     if text.len() > 100_000 {
         return Err("Text exceeds the current size limit".into());
     }
 
-    // Locate the Python engine in our development repository.
     let engine_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../engines/python");
 
@@ -18,7 +20,10 @@ fn detect_pii(text: String) -> Result<serde_json::Value, String> {
     #[cfg(not(windows))]
     let python = engine_dir.join(".venv/bin/python");
 
-    let request = serde_json::json!({ "text": text });
+    let request = serde_json::json!({
+        "text": text,
+        "entities": entities,
+    });
 
     let mut child = Command::new(python)
         .arg("-m")
@@ -31,7 +36,9 @@ fn detect_pii(text: String) -> Result<serde_json::Value, String> {
         .map_err(|_| "Unable to start the Python engine")?;
 
     {
-        let mut stdin = child.stdin.take()
+        let mut stdin = child
+            .stdin
+            .take()
             .ok_or("Unable to communicate with Python")?;
 
         stdin
@@ -39,7 +46,8 @@ fn detect_pii(text: String) -> Result<serde_json::Value, String> {
             .map_err(|_| "Unable to send detection request")?;
     }
 
-    let output = child.wait_with_output()
+    let output = child
+        .wait_with_output()
         .map_err(|_| "Python engine execution failed")?;
 
     if !output.status.success() {

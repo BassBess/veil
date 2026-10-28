@@ -3,6 +3,14 @@ from presidio_analyzer.nlp_engine import NlpEngineProvider
 
 
 class VeilDetector:
+    SUPPORTED_ENTITIES = {
+        "PERSON",
+        "EMAIL_ADDRESS",
+        "PHONE_NUMBER",
+        "LOCATION",
+        "ORGANIZATION",
+    }
+
     def __init__(self):
         config = {
             "nlp_engine_name": "spacy",
@@ -14,22 +22,39 @@ class VeilDetector:
             ],
         }
 
-        provider = NlpEngineProvider(
-            nlp_configuration=config
-        )
+        provider = NlpEngineProvider(nlp_configuration=config)
 
         self.analyzer = AnalyzerEngine(
             nlp_engine=provider.create_engine(),
             supported_languages=["en"],
         )
 
-    def detect(self, text: str) -> list[dict]:
+    def detect(
+        self,
+        text: str,
+        entities: list[str] | None = None,
+    ) -> list[dict]:
+
         if not isinstance(text, str):
             raise TypeError("Text must be a string")
+
+        # If specific categories were requested,
+        # keep only categories currently supported by Veil.
+        if entities is not None:
+            entities = [
+                entity
+                for entity in entities
+                if entity in self.SUPPORTED_ENTITIES
+            ]
+
+            # User selected no supported categories.
+            if not entities:
+                return []
 
         results = self.analyzer.analyze(
             text=text,
             language="en",
+            entities=entities,
         )
 
         return [
@@ -42,13 +67,18 @@ class VeilDetector:
             }
             for result in sorted(
                 results,
-                key=lambda item: (item.start, item.end)
+                key=lambda item: (item.start, item.end),
             )
         ]
-    def suggest(self, text: str) -> list[dict]:
-        candidates = self.detect(text)
 
-        # Prioritize confidence, then match length
+    def suggest(
+        self,
+        text: str,
+        entities: list[str] | None = None,
+    ) -> list[dict]:
+
+        candidates = self.detect(text, entities)
+
         ranked = sorted(
             candidates,
             key=lambda item: (
@@ -72,5 +102,5 @@ class VeilDetector:
 
         return sorted(
             selected,
-            key=lambda item: item["start"]
+            key=lambda item: item["start"],
         )
