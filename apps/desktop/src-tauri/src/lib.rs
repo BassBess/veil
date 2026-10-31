@@ -26,6 +26,7 @@ fn detect_pii(
     });
 
     let mut child = Command::new(python)
+        .env("PYTHONUTF8", "1")
         .arg("-m")
         .arg("veil_engine.bridge")
         .current_dir(engine_dir)
@@ -34,7 +35,6 @@ fn detect_pii(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| "Unable to start the Python engine")?;
-
     {
         let mut stdin = child
             .stdin

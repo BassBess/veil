@@ -380,3 +380,59 @@ footer {
     align-self: flex-end;
   }
 }
+
+/* ---------- Detection Review Controls ---------- */
+
+.review-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.review-controls button {
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+.review-controls .review-status {
+  background: #edf0f6;
+  color: #35435a;
+  font-size: 11px;
+}
+
+.review-controls button:focus-visible {
+  outline: 3px solid #17243b;
+  outline-offset: 2px;
+}
+
+@media (max-width: 700px) {
+  .review-controls {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .review-controls button {
+    width: auto;
+  }
+}
+.detection-item select {
+  max-width: 100%;
+  padding: 7px 10px;
+  border: 1px solid #c9cff8;
+  border-radius: 8px;
+  background: #f3f4ff;
+  color: #3541a5;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.detection-item select:focus-visible {
+  outline: 2px solid #5965e9;
+  outline-offset: 2px;
+}
+
+.detection-item > div:first-child {
+  flex-wrap: wrap;
+}
