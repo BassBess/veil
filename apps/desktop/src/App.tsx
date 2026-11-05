@@ -22,6 +22,11 @@ type DetectionResponse = {
   detections: Detection[];
 };
 
+type ValidatedDetection = Pick<
+  ReviewedDetection,
+  "id" | "entity_type" | "text" | "start" | "end"
+>;
+
 type PrivacyCategory = {
   label: string;
   value: string;
@@ -68,6 +73,15 @@ function App() {
   const [manualCategory, setManualCategory] = useState("PERSON");
   const [manualError, setManualError] = useState("");
 
+  const [validation, setValidation] = useState<{
+    snapshot: string;
+    success: boolean;
+    message: string;
+  } | null>(null);
+
+  const reviewSnapshot = JSON.stringify([text, detections]);
+
+
   function toggleEntity(entity: string) {
     if (loading) {
       return;
@@ -85,6 +99,7 @@ function App() {
     setDetections([]);
     setAnalyzed(false);
     setError("");
+    setValidation(null);
     setReviewError("");
     setManualError("");
     setManualSelection(null);
@@ -240,6 +255,7 @@ function App() {
 
     setLoading(true);
     setError("");
+    setValidation(null);
     setReviewError("");
     setManualError("");
     setManualSelection(null);
@@ -263,6 +279,57 @@ function App() {
       setAnalyzed(true);
     } catch (err) {
       setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+
+  async function validateAcceptedDetections() {
+    if (loading || !analyzed) return;
+
+    const accepted: ValidatedDetection[] = detections
+      .filter((item) => item.status === "accepted")
+      .map(({ id, entity_type, text, start, end }) => ({
+        id,
+        entity_type,
+        text,
+        start,
+        end,
+      }));
+
+    if (accepted.length === 0) return;
+
+    if (detections.some((item) => item.status === "pending")) {
+      setValidation({
+        snapshot: reviewSnapshot,
+        success: false,
+        message: "Please accept or reject all detections before validation.",
+      });
+      return;
+    }
+
+    const snapshot = reviewSnapshot;
+    setLoading(true);
+    setValidation(null);
+
+    try {
+      const result = await invoke<ValidatedDetection[]>(
+        "validate_reviewed_detections",
+        { text, detections: accepted }
+      );
+
+      setValidation({
+        snapshot,
+        success: true,
+        message: `${result.length} accepted detection(s) passed backend validation.`,
+      });
+    } catch (err) {
+      setValidation({
+        snapshot,
+        success: false,
+        message: `Validation failed: ${String(err)}`,
+      });
     } finally {
       setLoading(false);
     }
@@ -547,6 +614,28 @@ function App() {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            <div className="actions">
+              <button
+                type="button"
+                onClick={validateAcceptedDetections}
+                disabled={
+                  loading ||
+                  !detections.some((item) => item.status === "accepted")
+                }
+              >
+                {loading ? "Validating..." : "Validate Accepted Detections"}
+              </button>
+            </div>
+
+            {validation?.snapshot === reviewSnapshot && (
+              <div
+                className={validation.success ? "empty-results" : "error"}
+                role={validation.success ? "status" : "alert"}
+              >
+                {validation.message}
               </div>
             )}
           </section>

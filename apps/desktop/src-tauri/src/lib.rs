@@ -1,15 +1,46 @@
+mod review;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+fn validate_detection_request(
+    text: &str,
+    entities: &[String],
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("Please enter text before detection".into());
+    }
+
+    if text.len() > 100_000 {
+        return Err("Text exceeds the 100,000-byte limit".into());
+    }
+
+    if entities.is_empty() {
+        return Err("Select at least one PII category".into());
+    }
+
+    for entity in entities {
+        if !matches!(
+            entity.as_str(),
+            "PERSON"
+                | "EMAIL_ADDRESS"
+                | "PHONE_NUMBER"
+                | "LOCATION"
+                | "ORGANIZATION"
+        ) {
+            return Err(format!("Unsupported PII category: {entity}"));
+        }
+    }
+
+    Ok(())
+}
 
 #[tauri::command]
 fn detect_pii(
     text: String,
     entities: Vec<String>,
 ) -> Result<serde_json::Value, String> {
-    if text.len() > 100_000 {
-        return Err("Text exceeds the current size limit".into());
-    }
+    validate_detection_request(&text, &entities)?;
 
     let engine_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../engines/python");
@@ -61,7 +92,60 @@ fn detect_pii(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![detect_pii])
+        .invoke_handler(tauri::generate_handler![
+            detect_pii,
+            review::validate_reviewed_detections
+	])
         .run(tauri::generate_context!())
         .expect("error while building Veil");
+}
+
+#[cfg(test)]
+mod detection_request_tests {
+    use super::*;
+
+    fn categories() -> Vec<String> {
+        vec!["PERSON".into()]
+    }
+
+    #[test]
+    fn accepts_valid_request() {
+        assert!(validate_detection_request(
+            "John Smith",
+            &categories()
+        ).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_text() {
+        assert!(validate_detection_request(
+            "   ",
+            &categories()
+        ).is_err());
+    }
+
+    #[test]
+    fn rejects_no_categories() {
+        assert!(validate_detection_request(
+            "John Smith",
+            &[]
+        ).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_category() {
+        assert!(validate_detection_request(
+            "John Smith",
+            &["UNKNOWN".into()]
+        ).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_input() {
+        let text = "a".repeat(100_001);
+        assert!(validate_detection_request(
+            &text,
+            &categories()
+        ).is_err());
+    }
 }
