@@ -69,10 +69,12 @@ function rangesOverlap(
   return first.start < second.end && first.end > second.start;
 }
 
-type IconName = "home" | "database" | "vault" | "settings" | "arrow" | "plus" | "edit" | "trash";
+type IconName = "document" | "upload" | "home" | "database" | "vault" | "settings" | "arrow" | "plus" | "edit" | "trash";
 
 function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
+    document: <><path d="M14 3H5v18h14V8Z" /><path d="M14 3v5h5M8 12h8M8 16h6" /></>,
+    upload: <><path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5" /></>,
     home: <><path d="m3 10 9-7 9 7" /><path d="M5 9v12h5v-7h4v7h5V9" /></>,
     database: <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0" /></>,
     vault: <><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="12" cy="11" r="3" /><path d="M12 14v3" /></>,
@@ -86,6 +88,10 @@ function Icon({ name }: { name: IconName }) {
 }
 
 function App() {
+
+  const [workspaceView, setWorkspaceView] = useState("Anonymize");
+  const [reviewQuery, setReviewQuery] = useState("");
+  const [reviewFilter, setReviewFilter] = useState("all");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [selectionHint, setSelectionHint] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -446,7 +452,7 @@ function App() {
       setValidation({
         snapshot,
         success: true,
-        message: `${result.length} accepted detection(s) passed backend validation.`,
+        message: `${result.length} accepted item(s) validated.`,
       });
     } catch (err) {
       setValidation({
@@ -460,48 +466,51 @@ function App() {
   }
 
   return (
-    <div className="app">
-      <aside className="sidebar">
+    <div className="app" aria-busy={loading}>
+      <header className="sidebar">
         <div className="brand">
-          <svg className="logo" viewBox="0 0 44 48" aria-hidden="true">
-            <defs><linearGradient id="shield" x2="1" y2="1"><stop stopColor="#9870e0" /><stop offset="1" stopColor="#3f168b" /></linearGradient></defs>
-            <path fill="url(#shield)" d="M22 2 40 9v13c0 12-8 19-18 24C12 41 4 34 4 22V9Z" />
-            <path fill="#d5c1f4" d="m4 9 18 8v20C12 33 8 27 8 19Z" />
-            <path fill="#ffffff" opacity=".85" d="m22 17 10-5v11c0 6-4 11-10 14Z" />
-          </svg>
+          <div className={`vault-mark vault-reactive ${workspaceView === "Vault" ? "is-open" : ""}`} aria-hidden="true">
+            <div className="vault-door"><span className="vault-wheel"><i /><i /></span><span className="vault-handle" /></div>
+          </div>
           <span>Veil</span>
         </div>
         <nav aria-label="Main navigation">
-          <button className="nav-item active" aria-current="page"><Icon name="home" />Anonymize</button>
-          <button className="nav-item" disabled title="Coming soon"><Icon name="database" />Pseudonymize</button>
-          <button className="nav-item" disabled title="Coming soon"><Icon name="vault" />Vault</button>
-          <button className="nav-item" disabled title="Coming soon"><Icon name="settings" />Settings</button>
+          {["Anonymize", "Pseudonymize", "Vault", "Settings"].map((view) => (
+            <button key={view} className={`nav-item ${workspaceView === view ? "active" : ""}`} aria-current={workspaceView === view ? "page" : undefined} onClick={() => setWorkspaceView(view)}>
+              <Icon name={view === "Vault" ? "vault" : view === "Settings" ? "settings" : view === "Pseudonymize" ? "database" : "home"} />{view}
+            </button>
+          ))}
         </nav>
         <div className="sidebar-bottom"><span className="local-dot" />Processed locally on your device</div>
         <div className="sidebar-wave" aria-hidden="true" />
-      </aside>
+      </header>
 
       <main className="workspace">
         <header className="intro">
-          <h1>Protect Sensitive Information</h1>
-          <p>Detect, review, and transform personal data in your text.</p>
+          <h1>{workspaceView === "Anonymize" ? "Protect sensitive information" : workspaceView}</h1>
+          <p>{workspaceView === "Vault" ? "Records of processed people and sensitive information." : workspaceView === "Settings" ? "Manage your detection preferences." : "Inspect your documents and review sensitive information before sharing."}</p>
         </header>
 
-        <section aria-label="Document and detection settings" className="input-section">
+        {(workspaceView === "Vault" || workspaceView === "Settings") && <section className="view-details">
+          {workspaceView === "Vault" && <><div className="vault-display" aria-hidden="true"><div className="vault-mark is-open"><div className="vault-door"><span className="vault-wheel"><i /><i /></span><span className="vault-handle" /></div></div></div><h2>Your local vault</h2><p>No records to display.</p><button className="primary" onClick={() => setWorkspaceView("Anonymize")}>Open document workspace</button></>}
+          {workspaceView === "Settings" && <><h2>Detection categories</h2><p>Choose which information Veil should look for.</p><div className="privacy-categories">{PRIVACY_CATEGORIES.map((category) => <label className="privacy-category" key={category.value}><input type="checkbox" disabled={loading} checked={selectedEntities.includes(category.value)} onChange={() => toggleEntity(category.value)} />{category.label}</label>)}</div></>}
+        </section>}
+        <div hidden={workspaceView === "Vault" || workspaceView === "Settings"}>
+        <section aria-label="Document and detection settings" className="input-section" id="document">
           <div className="input-methods" aria-label="Document input method">
             <button className={`input-method ${!importedDocument ? "selected" : ""}`} aria-pressed={!importedDocument} disabled={loading} onClick={() => {
               setImportedDocument(null);
               setImportError("");
               inputRef.current?.focus();
-            }}>Paste text</button>
-            <button className={`input-method ${importedDocument ? "selected" : ""}`} aria-pressed={!!importedDocument} disabled={loading} onClick={uploadDocument}>{importing ? "Opening / parsing locally…" : "Upload document"}</button>
+            }}><Icon name="document" />Paste text</button>
+            <button className={`input-method ${importedDocument ? "selected" : ""}`} aria-pressed={!!importedDocument} disabled={loading} onClick={uploadDocument}><Icon name="upload" />{importing ? "Opening / parsing locally…" : "Upload document"}</button>
             <span className="upload-help">TXT, DOCX, PDF, CSV, XLSX · up to 20 MB · local only</span>
           </div>
           {importedDocument && (
             <div className="file-summary">
               <div><strong>{importedDocument.file_name}</strong><span>{importedDocument.file_type.toUpperCase()}{importedDocument.pages !== null ? ` · ${importedDocument.pages} page(s)` : ""}</span></div>
-              <button className="secondary-button" disabled={loading} onClick={uploadDocument}>Replace file</button>
-              <button className="secondary-button" disabled={loading} onClick={removeDocument}>Remove file</button>
+              <button className="secondary-button" disabled={loading} onClick={uploadDocument}><Icon name="upload" />Replace file</button>
+              <button className="secondary-button" disabled={loading} onClick={removeDocument}><Icon name="trash" />Remove file</button>
             </div>
           )}
           {importing && <p className="selection-hint" role="status">Choose a document in the local file picker. Its text will be extracted on this device.</p>}
@@ -569,18 +578,29 @@ function App() {
           {error && <div className="error" role="alert">Detection failed: {error}</div>}
         </section>
 
-        <section className="results-panel" aria-labelledby="results-heading">
+        <section className="results-panel" id="review" aria-labelledby="results-heading">
           <div className="panel-header">
             <div><h2 id="results-heading">Detected Information</h2><p>Review and refine the detected items before continuing.</p></div>
-            <span className="result-count">{detections.length} {detections.length === 1 ? "item" : "items"}</span>
+            <span className="result-count">{detections.filter((item) => item.status !== "pending").length} / {detections.length} reviewed</span>
           </div>
           {documentEdited && <p className="selection-hint" role="status">Your review has been preserved. Items affected by text changes need review again. Newly added information is not automatically detected; select it to add it manually.</p>}
           {reviewError && !editingDetection && <div className="error" role="alert">{reviewError}</div>}
+          <div className="review-toolbar">
+            <input type="search" aria-label="Search detected information" placeholder="Search detected information" value={reviewQuery} onChange={(event) => setReviewQuery(event.target.value)} />
+            <select aria-label="Filter review status" value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value)}>
+              <option value="all">All detections</option>
+              <option value="pending">Pending review</option>
+              <option value="accepted">Accepted</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <button className="secondary-button" disabled={!reviewQuery && reviewFilter === "all"} onClick={() => { setReviewQuery(""); setReviewFilter("all"); }}>Clear filters</button>
+          </div>
+          {detections.length > 0 && !detections.some((item) => (reviewFilter === "all" || item.status === reviewFilter) && item.text.toLowerCase().includes(reviewQuery.toLowerCase())) && <p role="status" className="selection-hint">No detections match these filters.</p>}
           {detections.length === 0 ? (
             <div className="empty-results">{analyzed ? "No sensitive information detected. Select text above to add missed information." : "Your detected information will appear here. Add your text and select Detect to get started."}</div>
           ) : (
             <div className="detection-list">
-              {detections.map((item) => (
+              {detections.filter((item) => (reviewFilter === "all" || item.status === reviewFilter) && item.text.toLowerCase().includes(reviewQuery.toLowerCase())).map((item) => (
                 <div className={`detection-item ${item.status} ${editingId === item.id ? "editing" : ""}`} key={item.id}>
 
                   <div className="entity-text"><strong>{item.text}</strong><span className="review-status">{item.needsCorrection && item.status !== "rejected" ? "Text removed — edit or reject" : item.status === "pending" ? "Pending review" : item.status === "rejected" ? "Rejected" : "Accepted"}</span></div>
@@ -611,11 +631,12 @@ function App() {
           <div className="continue-actions">
             {analyzed && detections.some((item) => item.status === "pending") && <p>Accept or reject each item to continue.</p>}
             <button className="primary continue-button" title="Validate accepted detections" onClick={validateAcceptedDetections} disabled={loading || editingId !== null || !detections.some((item) => item.status === "accepted")}>
-              {!importing && loading && analyzed ? "Validating…" : "Continue"}<Icon name="arrow" />
+              {!importing && loading && analyzed ? "Validating…" : "Validate review"}<Icon name="arrow" />
             </button>
           </div>
           {validation?.snapshot === reviewSnapshot && <div className={validation.success ? "validation-success" : "error"} role={validation.success ? "status" : "alert"}>{validation.message}</div>}
         </section>
+        </div>
       </main>
     </div>
   );
