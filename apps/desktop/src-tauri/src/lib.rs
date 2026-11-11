@@ -1,4 +1,5 @@
 mod review;
+mod documents;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -35,13 +36,7 @@ fn validate_detection_request(
     Ok(())
 }
 
-#[tauri::command]
-fn detect_pii(
-    text: String,
-    entities: Vec<String>,
-) -> Result<serde_json::Value, String> {
-    validate_detection_request(&text, &entities)?;
-
+fn engine_command() -> Command {
     let engine_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../engines/python");
 
@@ -51,16 +46,28 @@ fn detect_pii(
     #[cfg(not(windows))]
     let python = engine_dir.join(".venv/bin/python");
 
+    let mut command = Command::new(python);
+    command
+        .env("PYTHONUTF8", "1")
+        .arg("-m")
+        .arg("veil_engine.bridge")
+        .current_dir(engine_dir);
+    command
+}
+
+#[tauri::command]
+fn detect_pii(
+    text: String,
+    entities: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    validate_detection_request(&text, &entities)?;
+
     let request = serde_json::json!({
         "text": text,
         "entities": entities,
     });
 
-    let mut child = Command::new(python)
-        .env("PYTHONUTF8", "1")
-        .arg("-m")
-        .arg("veil_engine.bridge")
-        .current_dir(engine_dir)
+    let mut child = engine_command()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -92,10 +99,12 @@ fn detect_pii(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             detect_pii,
+            documents::parse_document,
             review::validate_reviewed_detections
-	])
+        ])
         .run(tauri::generate_context!())
         .expect("error while building Veil");
 }

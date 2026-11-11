@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
+import { rebaseDetections } from "./rebaseDetections";
 
 type Detection = {
   entity_type: string;
@@ -16,6 +17,7 @@ type ReviewedDetection = Omit<Detection, "confidence"> & {
   id: string;
   status: ReviewStatus;
   confidence: number | null;
+  needsCorrection?: boolean;
 };
 
 type DetectionResponse = {
@@ -26,6 +28,20 @@ type ValidatedDetection = Pick<
   ReviewedDetection,
   "id" | "entity_type" | "text" | "start" | "end"
 >;
+
+type ParsedDocument = {
+  text: string;
+  file_name: string;
+  file_type: string;
+  pages: number | null;
+  warnings: string[];
+};
+
+function importErrorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null && "message" in error && typeof error.message === "string") return error.message;
+  if (typeof error === "string") return error;
+  return "The document could not be imported. Please try another file.";
+}
 
 type PrivacyCategory = {
   label: string;
@@ -53,7 +69,26 @@ function rangesOverlap(
   return first.start < second.end && first.end > second.start;
 }
 
+type IconName = "home" | "database" | "vault" | "settings" | "arrow" | "plus" | "edit" | "trash";
+
+function Icon({ name }: { name: IconName }) {
+  const paths: Record<IconName, React.ReactNode> = {
+    home: <><path d="m3 10 9-7 9 7" /><path d="M5 9v12h5v-7h4v7h5V9" /></>,
+    database: <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0" /></>,
+    vault: <><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="12" cy="11" r="3" /><path d="M12 14v3" /></>,
+    settings: <><path d="m9 3-1 3-3 1 1 3-2 2 2 2-1 3 3 1 1 3h6l1-3 3-1-1-3 2-2-2-2 1-3-3-1-1-3Z" /><circle cx="12" cy="12" r="3" /></>,
+    arrow: <><path d="M4 12h16m-6-6 6 6-6 6" /></>,
+    plus: <path d="M12 5v14M5 12h14" />,
+    edit: <><path d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14Z" /></>,
+    trash: <><path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7" /></>,
+  };
+  return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
 function App() {
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [selectionHint, setSelectionHint] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [text, setText] = useState(
     "John Smith lives in New York. Contact him at john.smith@example.com."
   );
@@ -63,6 +98,10 @@ function App() {
   const [error, setError] = useState("");
   const [analyzed, setAnalyzed] = useState(false);
   const [reviewError, setReviewError] = useState("");
+  const [documentEdited, setDocumentEdited] = useState(false);
+  const [importedDocument, setImportedDocument] = useState<ParsedDocument | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState("");
 
   const [selectedEntities, setSelectedEntities] = useState<string[]>(
     PRIVACY_CATEGORIES.map((category) => category.value)
@@ -82,6 +121,30 @@ function App() {
   const reviewSnapshot = JSON.stringify([text, detections]);
 
 
+  const editingDetection = detections.find((item) => item.id === editingId);
+
+  function cancelEdit() {
+    setEditingId(null);
+    setManualSelection(null);
+    setReviewError("");
+  }
+
+  function startEdit(item: ReviewedDetection) {
+    setEditingId(item.id);
+    setManualSelection(null);
+    setSelectionHint(false);
+    setReviewError("");
+    setManualError("");
+    const input = inputRef.current;
+    if (input) {
+      input.focus();
+      // Convert code-point offsets back to the textarea's UTF-16 offsets.
+      const chars = Array.from(text);
+      input.setSelectionRange(chars.slice(0, item.start).join("").length, chars.slice(0, item.end).join("").length);
+      input.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+
   function toggleEntity(entity: string) {
     if (loading) {
       return;
@@ -95,14 +158,65 @@ function App() {
   }
 
   function updateText(value: string) {
+    if (value === text) return;
+    if (importedDocument) {
+      setDetections([]);
+      setAnalyzed(false);
+      setDocumentEdited(false);
+    } else {
+      setDetections((current) => rebaseDetections(text, value, current));
+      if (analyzed) setDocumentEdited(true);
+    }
     setText(value);
-    setDetections([]);
-    setAnalyzed(false);
+    setEditingId(null);
+    setSelectionHint(false);
     setError("");
     setValidation(null);
     setReviewError("");
     setManualError("");
     setManualSelection(null);
+  }
+
+  function replaceDocumentText(value: string) {
+    setText(value);
+    setDetections([]);
+    setAnalyzed(false);
+    setDocumentEdited(false);
+    setEditingId(null);
+    setSelectionHint(false);
+    setManualSelection(null);
+    setValidation(null);
+    setError("");
+    setReviewError("");
+    setManualError("");
+    setImportError("");
+  }
+
+  async function uploadDocument() {
+    if (loading) return;
+    setLoading(true);
+    setImporting(true);
+    setImportError("");
+    try {
+      const document = await invoke<ParsedDocument | null>("parse_document");
+      // Cancellation and failures preserve the current text and review decisions.
+      if (document) {
+        replaceDocumentText(document.text);
+        setImportedDocument(document);
+      }
+    } catch (error) {
+      setImportError(importErrorMessage(error));
+    } finally {
+      setLoading(false);
+      setImporting(false);
+    }
+  }
+
+  function removeDocument() {
+    if (loading) return;
+    setImportedDocument(null);
+    replaceDocumentText("");
+    inputRef.current?.focus();
   }
 
   function addManualDetection() {
@@ -179,6 +293,7 @@ function App() {
                 start: manualSelection.start,
                 end: manualSelection.end,
                 confidence: null,
+                needsCorrection: false,
                 status: "pending" as ReviewStatus,
               }
             : item
@@ -186,6 +301,7 @@ function App() {
         .sort((first, second) => first.start - second.start)
     );
 
+    setEditingId(null);
     setManualSelection(null);
     setManualError("");
     setReviewError("");
@@ -221,6 +337,11 @@ function App() {
     const target = detections.find((item) => item.id === id);
 
     if (!target) {
+      return;
+    }
+
+    if (status === "accepted" && target.needsCorrection) {
+      setReviewError("This text was removed from the document. Edit this item to select a new range, or reject it.");
       return;
     }
 
@@ -261,6 +382,8 @@ function App() {
     setManualSelection(null);
     setDetections([]);
     setAnalyzed(false);
+    setEditingId(null);
+    setSelectionHint(false);
 
     try {
       const response = await invoke<DetectionResponse>("detect_pii", {
@@ -277,6 +400,7 @@ function App() {
       );
 
       setAnalyzed(true);
+      setDocumentEdited(false);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -337,66 +461,74 @@ function App() {
 
   return (
     <div className="app">
-      <header className="header">
+      <aside className="sidebar">
         <div className="brand">
-          <div className="logo">V</div>
-
-          <div>
-            <h1>Veil</h1>
-            <p>Privacy starts here.</p>
-          </div>
+          <svg className="logo" viewBox="0 0 44 48" aria-hidden="true">
+            <defs><linearGradient id="shield" x2="1" y2="1"><stop stopColor="#9870e0" /><stop offset="1" stopColor="#3f168b" /></linearGradient></defs>
+            <path fill="url(#shield)" d="M22 2 40 9v13c0 12-8 19-18 24C12 41 4 34 4 22V9Z" />
+            <path fill="#d5c1f4" d="m4 9 18 8v20C12 33 8 27 8 19Z" />
+            <path fill="#ffffff" opacity=".85" d="m22 17 10-5v11c0 6-4 11-10 14Z" />
+          </svg>
+          <span>Veil</span>
         </div>
-
-        <div className="status">
-          <span>●</span>
-          Local Processing
-        </div>
-      </header>
+        <nav aria-label="Main navigation">
+          <button className="nav-item active" aria-current="page"><Icon name="home" />Anonymize</button>
+          <button className="nav-item" disabled title="Coming soon"><Icon name="database" />Pseudonymize</button>
+          <button className="nav-item" disabled title="Coming soon"><Icon name="vault" />Vault</button>
+          <button className="nav-item" disabled title="Coming soon"><Icon name="settings" />Settings</button>
+        </nav>
+        <div className="sidebar-bottom"><span className="local-dot" />Processed locally on your device</div>
+        <div className="sidebar-wave" aria-hidden="true" />
+      </aside>
 
       <main className="workspace">
-        <section className="intro">
-          <p className="eyebrow">PRIVACY WORKSPACE</p>
-          <h2>Protect what matters.</h2>
+        <header className="intro">
+          <h1>Protect Sensitive Information</h1>
+          <p>Detect, review, and transform personal data in your text.</p>
+        </header>
 
-          <p className="intro-text">
-            Detect sensitive information in your text before sharing it with
-            others.
-          </p>
-        </section>
-
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <h3>Document Input</h3>
-              <p>Paste the text you want Veil to inspect.</p>
-            </div>
-
-            <span className="character-count">
-              {text.length.toLocaleString()} / 100,000
-            </span>
+        <section aria-label="Document and detection settings" className="input-section">
+          <div className="input-methods" aria-label="Document input method">
+            <button className={`input-method ${!importedDocument ? "selected" : ""}`} aria-pressed={!importedDocument} disabled={loading} onClick={() => {
+              setImportedDocument(null);
+              setImportError("");
+              inputRef.current?.focus();
+            }}>Paste text</button>
+            <button className={`input-method ${importedDocument ? "selected" : ""}`} aria-pressed={!!importedDocument} disabled={loading} onClick={uploadDocument}>{importing ? "Opening / parsing locally…" : "Upload document"}</button>
+            <span className="upload-help">TXT, DOCX, PDF, CSV, XLSX · up to 20 MB · local only</span>
           </div>
-
+          {importedDocument && (
+            <div className="file-summary">
+              <div><strong>{importedDocument.file_name}</strong><span>{importedDocument.file_type.toUpperCase()}{importedDocument.pages !== null ? ` · ${importedDocument.pages} page(s)` : ""}</span></div>
+              <button className="secondary-button" disabled={loading} onClick={uploadDocument}>Replace file</button>
+              <button className="secondary-button" disabled={loading} onClick={removeDocument}>Remove file</button>
+            </div>
+          )}
+          {importing && <p className="selection-hint" role="status">Choose a document in the local file picker. Its text will be extracted on this device.</p>}
+          {importError && <div className="error" role="alert">{importError}</div>}
+          {importedDocument?.warnings.map((warning, index) => <div className="document-warning" role="status" key={index}>{warning}</div>)}
+          <div className="document-input" aria-busy={importing}>
+            <span className="input-size" id="input-size">{text.length.toLocaleString()} / 100,000 characters</span>
           <textarea
+            ref={inputRef}
             aria-label="Document input"
             value={text}
             onChange={(event) => updateText(event.target.value)}
             disabled={loading}
+            aria-describedby={editingDetection ? "input-size edit-instructions" : "input-size"}
             maxLength={100000}
-            placeholder="Paste your text here..."
+            placeholder="Paste your text here…"
             onSelect={(event) => {
               const input = event.currentTarget;
               const start = input.selectionStart;
               const end = input.selectionEnd;
               const selectedText = input.value.slice(start, end);
-
               setManualError("");
-
               if (!analyzed || loading || !selectedText.trim()) {
                 setManualSelection(null);
                 return;
               }
-
-              // Match Python's Unicode code-point positions.
+              setSelectionHint(false);
               setManualSelection({
                 start: Array.from(input.value.slice(0, start)).length,
                 end: Array.from(input.value.slice(0, end)).length,
@@ -404,245 +536,87 @@ function App() {
               });
             }}
           />
-
-          {analyzed && manualSelection && (
-            <div className="manual-detection">
-              <p>
-                Selected text: <strong>{manualSelection.text}</strong>
-              </p>
-
-              <label>
-                Category{" "}
-                <select
-                  value={manualCategory}
-                  onChange={(event) => {
-                    setManualCategory(event.target.value);
-                    setManualError("");
-                  }}
-                >
-                  {PRIVACY_CATEGORIES.map((category) => (
-                    <option key={category.value} value={category.value}>
-                      {category.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <button
-                type="button"
-                onClick={addManualDetection}
-                disabled={loading}
-              >
-                Add missed PII
-              </button>
-
-              {manualError && (
-                <div className="error" role="alert">
-                  {manualError}
-                </div>
-              )}
+          </div>
+          {editingDetection && (
+            <div className="edit-panel" aria-label="Correct detection">
+              <div id="edit-instructions" role="status">
+                <strong>Editing “{editingDetection.text}”</strong>
+                <p>Select the corrected text in the document above, then save your correction.</p>
+                <p>Replacement: <strong>{manualSelection?.text ?? "Select text above"}</strong></p>
+              </div>
+              <div className="edit-actions">
+                <button className="secondary-button" onClick={cancelEdit} disabled={loading}>Cancel</button>
+                <button className="primary" disabled={loading || !manualSelection} onClick={() => updateDetectionBoundary(editingDetection.id)}>Save correction</button>
+              </div>
+              {reviewError && <div className="error" role="alert">{reviewError}</div>}
             </div>
           )}
-
-          <div className="privacy-settings">
-            <div className="privacy-settings-header">
-              <div>
-                <h3>Privacy Settings</h3>
-                <p>Select which types of sensitive data Veil should detect.</p>
-              </div>
-            </div>
-
+          <div className="detect-toolbar">
+            <span className="detect-label">Detect</span>
             <div className="privacy-categories">
-              {PRIVACY_CATEGORIES.map((category) => (
-                <label
-                  key={category.value}
-                  className="privacy-category"
-                >
-                  <input
-                    type="checkbox"
-                    disabled={loading}
-                    checked={selectedEntities.includes(category.value)}
-                    onChange={() => toggleEntity(category.value)}
-                  />
-
-                  <span>{category.label}</span>
+              {PRIVACY_CATEGORIES.map((category, index) => (
+                <label key={category.value} className="privacy-category">
+                  <input type="checkbox" disabled={loading} checked={selectedEntities.includes(category.value)} onChange={() => toggleEntity(category.value)} />
+                  <span>{["Names", "Emails", "Phones", "Locations", "Organizations"][index]}</span>
                 </label>
               ))}
             </div>
-          </div>
-
-          <div className="actions">
-            <span className="engine-label">
-              English · Presidio + spaCy
-            </span>
-
-            <button
-              type="button"
-              onClick={detectPII}
-              disabled={
-                loading ||
-                !text.trim() ||
-                selectedEntities.length === 0
-              }
-            >
-              {loading ? "Detecting..." : "Detect Sensitive Data →"}
+            <button className="primary detect-button" onClick={detectPII} disabled={loading || !text.trim() || selectedEntities.length === 0}>
+              {!importing && loading && !analyzed ? "Detecting…" : "Detect"}<Icon name="arrow" />
             </button>
           </div>
-
-          {selectedEntities.length === 0 && (
-            <div className="error">
-              Select at least one sensitive data category.
-            </div>
-          )}
-
-          {error && (
-            <div className="error" role="alert">
-              Detection failed: {error}
-            </div>
-          )}
+          {selectedEntities.length === 0 && <div className="error" role="alert">Select at least one sensitive data category.</div>}
+          {error && <div className="error" role="alert">Detection failed: {error}</div>}
         </section>
 
-        {analyzed && (
-          <section className="panel results-panel">
-            <div className="panel-header">
-              <div>
-                <h3>Detection Results</h3>
-                <p>
-                  Review the sensitive information identified by Veil.
-                </p>
-              </div>
+        <section className="results-panel" aria-labelledby="results-heading">
+          <div className="panel-header">
+            <div><h2 id="results-heading">Detected Information</h2><p>Review and refine the detected items before continuing.</p></div>
+            <span className="result-count">{detections.length} {detections.length === 1 ? "item" : "items"}</span>
+          </div>
+          {documentEdited && <p className="selection-hint" role="status">Your review has been preserved. Items affected by text changes need review again. Newly added information is not automatically detected; select it to add it manually.</p>}
+          {reviewError && !editingDetection && <div className="error" role="alert">{reviewError}</div>}
+          {detections.length === 0 ? (
+            <div className="empty-results">{analyzed ? "No sensitive information detected. Select text above to add missed information." : "Your detected information will appear here. Add your text and select Detect to get started."}</div>
+          ) : (
+            <div className="detection-list">
+              {detections.map((item) => (
+                <div className={`detection-item ${item.status} ${editingId === item.id ? "editing" : ""}`} key={item.id}>
 
-              <span className="result-count">
-                {detections.length}{" "}
-                {detections.length === 1 ? "entity" : "entities"}
-              </span>
-            </div>
-
-            {reviewError && (
-              <div className="error" role="alert">
-                {reviewError}
-              </div>
-            )}
-
-            {detections.length === 0 ? (
-              <div className="empty-results">
-                No sensitive information was detected for the selected
-                categories. You can select text above to add missed PII.
-              </div>
-            ) : (
-              <div className="detection-list">
-                {detections.map((item) => (
-                  <div className="detection-item" key={item.id}>
-                    <div>
-                      <strong>{item.text}</strong>
-
-                      <select
-                        aria-label={`Category for ${item.text}`}
-                        value={item.entity_type}
-                        disabled={loading}
-                        onChange={(event) =>
-                          updateDetectionCategory(
-                            item.id,
-                            event.target.value
-                          )
-                        }
-                      >
-                        {PRIVACY_CATEGORIES.map((category) => (
-                          <option
-                            key={category.value}
-                            value={category.value}
-                          >
-                            {category.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="review-controls">
-                      <button
-                        type="button"
-                        disabled={loading || !manualSelection}
-                        onClick={() => updateDetectionBoundary(item.id)}
-                      >
-                        Use selected text
-                      </button>
-                      <div className="confidence">
-                        {item.confidence === null
-                          ? "Manually reviewed"
-                          : `${(item.confidence * 100).toFixed(0)}% score`}
-                      </div>
-
-                      <span className="review-status">
-                        {item.status === "pending"
-                          ? "Pending review"
-                          : item.status === "accepted"
-                            ? "Accepted"
-                            : "Rejected"}
-                      </span>
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateReviewStatus(item.id, "accepted")
-                        }
-                        disabled={loading || item.status === "accepted"}
-                      >
-                        Accept
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateReviewStatus(item.id, "rejected")
-                        }
-                        disabled={loading || item.status === "rejected"}
-                      >
-                        Reject
-                      </button>
-
-                      {item.status !== "pending" && (
-                        <button
-                          type="button"
-                          disabled={loading}
-                          onClick={() =>
-                            updateReviewStatus(item.id, "pending")
-                          }
-                        >
-                          Reset
-                        </button>
-                      )}
-                    </div>
+                  <div className="entity-text"><strong>{item.text}</strong><span className="review-status">{item.needsCorrection && item.status !== "rejected" ? "Text removed — edit or reject" : item.status === "pending" ? "Pending review" : item.status === "rejected" ? "Rejected" : "Accepted"}</span></div>
+                  <select aria-label={`Category for ${item.text}`} value={item.entity_type} disabled={loading || editingId !== null} onChange={(event) => updateDetectionCategory(item.id, event.target.value)}>
+                    {PRIVACY_CATEGORIES.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}
+                  </select>
+                  <span className="confidence">{item.confidence === null ? "Manual" : `${(item.confidence * 100).toFixed(0)}%`}</span>
+                  <div className="row-actions">
+                    <button className="secondary-button edit-button" aria-label={`Edit ${item.text}`} disabled={loading || editingId !== null} onClick={() => startEdit(item)}><Icon name="edit" />Edit</button>
+                    <button className={`review-button accept-button ${item.status === "accepted" ? "selected" : ""}`} aria-pressed={item.status === "accepted"} aria-label={`Accept ${item.text}`} disabled={loading || editingId !== null || item.status === "accepted"} onClick={() => updateReviewStatus(item.id, "accepted")}>Accept</button>
+                    <button className={`review-button reject-button ${item.status === "rejected" ? "selected" : ""}`} aria-pressed={item.status === "rejected"} aria-label={`Reject ${item.text}`} disabled={loading || editingId !== null || item.status === "rejected"} onClick={() => updateReviewStatus(item.id, "rejected")}>Reject</button>
+                    {item.status !== "pending" && <button className="reset-button" disabled={loading || editingId !== null} onClick={() => updateReviewStatus(item.id, "pending")} aria-label={`Reset review for ${item.text}`}>Reset</button>}
                   </div>
-                ))}
-              </div>
-            )}
-
-            <div className="actions">
-              <button
-                type="button"
-                onClick={validateAcceptedDetections}
-                disabled={
-                  loading ||
-                  !detections.some((item) => item.status === "accepted")
-                }
-              >
-                {loading ? "Validating..." : "Validate Accepted Detections"}
-              </button>
+                </div>
+              ))}
             </div>
-
-            {validation?.snapshot === reviewSnapshot && (
-              <div
-                className={validation.success ? "empty-results" : "error"}
-                role={validation.success ? "status" : "alert"}
-              >
-                {validation.message}
-              </div>
-            )}
-          </section>
-        )}
+          )}
+          <button className="add-button" disabled={!analyzed || loading || editingId !== null} onClick={() => { setSelectionHint(true); inputRef.current?.focus(); }}><Icon name="plus" />Add missed information</button>
+          {selectionHint && <p className="selection-hint" role="status">Select the missed information in the document above, choose a category, then select Add information.</p>}
+          {analyzed && manualSelection && !editingId && (
+            <div className="manual-detection">
+              <p>Selected text: <strong>{manualSelection.text}</strong></p>
+              <label>Category <select value={manualCategory} disabled={loading} onChange={(event) => { setManualCategory(event.target.value); setManualError(""); }}>{PRIVACY_CATEGORIES.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select></label>
+              <button className="primary" onClick={addManualDetection} disabled={loading}>Add information<Icon name="plus" /></button>
+              {manualError && <div className="error" role="alert">{manualError}</div>}
+            </div>
+          )}
+          <div className="continue-actions">
+            {analyzed && detections.some((item) => item.status === "pending") && <p>Accept or reject each item to continue.</p>}
+            <button className="primary continue-button" title="Validate accepted detections" onClick={validateAcceptedDetections} disabled={loading || editingId !== null || !detections.some((item) => item.status === "accepted")}>
+              {!importing && loading && analyzed ? "Validating…" : "Continue"}<Icon name="arrow" />
+            </button>
+          </div>
+          {validation?.snapshot === reviewSnapshot && <div className={validation.success ? "validation-success" : "error"} role={validation.success ? "status" : "alert"}>{validation.message}</div>}
+        </section>
       </main>
-
-      <footer>Veil v0.1 · Local-first privacy engine</footer>
     </div>
   );
 }

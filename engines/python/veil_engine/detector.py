@@ -1,5 +1,16 @@
+import spacy
+from tldextract import TLDExtract
 from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.predefined_recognizers import EmailRecognizer
 from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+
+class OfflineEmailRecognizer(EmailRecognizer):
+    # Use the packaged public-suffix snapshot: never fetch updates or write a cache.
+    _extract = TLDExtract(suffix_list_urls=(), cache_dir=None)
+
+    def validate_result(self, pattern_text):
+        return self._extract(pattern_text).fqdn != ""
 
 
 class VeilDetector:
@@ -12,6 +23,8 @@ class VeilDetector:
     }
 
     def __init__(self):
+        if not spacy.util.is_package("en_core_web_sm"):
+            raise RuntimeError("The local en_core_web_sm model is missing. Install the Python requirements before using detection.")
         config = {
             "nlp_engine_name": "spacy",
             "models": [
@@ -28,6 +41,8 @@ class VeilDetector:
             nlp_engine=provider.create_engine(),
             supported_languages=["en"],
         )
+        self.analyzer.registry.remove_recognizer("EmailRecognizer")
+        self.analyzer.registry.add_recognizer(OfflineEmailRecognizer())
 
     def detect(
         self,
