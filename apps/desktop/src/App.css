@@ -826,3 +826,20 @@ textarea:focus { background: white; }
 .file-summary .secondary-button svg { width: 16px; height: 16px; }
 @media(max-width:760px) { .upload-help { width: 100%; padding: 12px 0; margin: 0; } }
 @media(prefers-reduced-motion:reduce) { .vault-reactive .vault-door, .vault-reactive .vault-wheel { transition: none; } }
+.mode-indicator { display: flex; align-items: flex-start; gap: 13px; padding: 17px 20px; margin-bottom: 20px; border: 1px solid #c8d7e5; border-left: 4px solid #244f75; border-radius: 5px; background: linear-gradient(105deg,#e4edf6,#f7fafc); }
+.mode-indicator > svg { flex-shrink: 0; margin-top: 2px; color: #244f75; }
+.mode-indicator strong { color: #1d405f; font-size: 14px; }
+.mode-indicator p { color: #4a647b; font-size: 13px; margin: 5px 0 7px; line-height: 1.5; }
+.mode-indicator span { color: #647b8f; font-size: 12px; }
+.pseudonymize-mode { border-left-color: #286c79; background: linear-gradient(105deg,#e2eff0,#f7fafc); }
+.pseudonymize-mode > svg { color: #286c79; }
+/* Geometric navy header. */
+.sidebar { position: relative; isolation: isolate; overflow: hidden; background: linear-gradient(112deg,#091c32 0%,#173c60 32%,#3b7098 63%,#224968 83%,#102b46 100%); }
+.sidebar::before { content: ""; position: absolute; z-index: -1; pointer-events: none; width: 250px; height: 250px; right: 18%; top: -185px; border: 1px solid #d1e6f32b; border-radius: 18px; transform: rotate(35deg); background: linear-gradient(135deg,#ffffff0b,#ffffff02); }
+.sidebar::after { content: ""; position: absolute; z-index: -1; pointer-events: none; width: 190px; height: 190px; right: 3%; top: -65px; border: 1px solid #c3def31f; border-radius: 14px; transform: rotate(35deg); background: linear-gradient(135deg,#ffffff09,transparent); }
+.sidebar .nav-item.active { background: #071c3438; border-color: #d6e8f34a; box-shadow: inset 0 1px #ffffff0c; }
+.sidebar .nav-item:hover { background: #071c3429; }
+/* Visible angular facets behind the header controls. */
+.sidebar::before { inset: 0 0 0 auto; width: 48%; height: 100%; transform: none; border: 0; border-radius: 0; clip-path: polygon(25% 0,100% 0,100% 100%,0 100%); background: linear-gradient(115deg,#97bddb35,#abcde91a); }
+.sidebar::after { inset: 0 0 0 auto; width: 24%; height: 100%; transform: none; border: 0; border-radius: 0; clip-path: polygon(40% 0,100% 0,100% 100%,0 100%); background: linear-gradient(120deg,#061a3652,#122c465e); }
+.sidebar .brand, .sidebar nav, .sidebar-bottom { position: relative; z-index: 1; }

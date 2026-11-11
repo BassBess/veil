@@ -487,7 +487,7 @@ function App() {
 
       <main className="workspace">
         <header className="intro">
-          <h1>{workspaceView === "Anonymize" ? "Protect sensitive information" : workspaceView}</h1>
+          <h1>{workspaceView === "Anonymize" ? "Anonymization workspace" : workspaceView === "Pseudonymize" ? "Pseudonymization workspace" : workspaceView}</h1>
           <p>{workspaceView === "Vault" ? "Records of processed people and sensitive information." : workspaceView === "Settings" ? "Manage your detection preferences." : "Inspect your documents and review sensitive information before sharing."}</p>
         </header>
 
@@ -496,6 +496,12 @@ function App() {
           {workspaceView === "Settings" && <><h2>Detection categories</h2><p>Choose which information Veil should look for.</p><div className="privacy-categories">{PRIVACY_CATEGORIES.map((category) => <label className="privacy-category" key={category.value}><input type="checkbox" disabled={loading} checked={selectedEntities.includes(category.value)} onChange={() => toggleEntity(category.value)} />{category.label}</label>)}</div></>}
         </section>}
         <div hidden={workspaceView === "Vault" || workspaceView === "Settings"}>
+        <div className={`mode-indicator ${workspaceView === "Pseudonymize" ? "pseudonymize-mode" : ""}`} role="status" aria-live="polite">
+          <Icon name={workspaceView === "Pseudonymize" ? "database" : "home"} />
+          <div><strong>{workspaceView === "Pseudonymize" ? "Pseudonymization" : "Anonymization"}</strong>
+          <p>{workspaceView === "Pseudonymize" ? "Reversible replacement using pseudonyms and a secure identity mapping." : "Irreversible removal or replacement of identifying information."}</p>
+          <span>Current step: detect and review sensitive information.</span></div>
+        </div>
         <section aria-label="Document and detection settings" className="input-section" id="document">
           <div className="input-methods" aria-label="Document input method">
             <button className={`input-method ${!importedDocument ? "selected" : ""}`} aria-pressed={!importedDocument} disabled={loading} onClick={() => {
