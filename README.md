@@ -63,7 +63,7 @@ Early development — Phase 1
 ## Local Vault sign-in
 
 Anonymization works without creating or unlocking a Vault. It replaces reviewed
-information with category labels such as `[PERSON]`, `[EMAIL]`, and `[LOCATION]`, keeps the result only in the current workspace,
+information with consistent document-local tokens such as `PERSON_001`, `EMAIL_001`, and `LOCATION_001`, keeps the result only in the current workspace,
 and supports TXT/PDF export without saving document history to the Vault.
 Pseudonymization requires an unlocked Vault to save reusable identity mappings,
 processed document history, and originals for restoration. Existing history is

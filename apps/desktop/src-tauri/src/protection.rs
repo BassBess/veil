@@ -1,4 +1,4 @@
-use crate::review::{ReviewedEntity, validate_reviewed_detections};
+use crate::review::{validate_reviewed_detections, ReviewedEntity};
 use crate::vault_storage::UnlockedVault;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -127,25 +127,13 @@ impl SessionVault {
         let chars: Vec<char> = text.chars().collect();
         let mut output = String::new();
         let mut cursor = 0;
+        let mut temporary_identities = SessionVault::default();
         for entity in &approved {
             output.extend(chars[cursor..entity.start].iter());
             if mode == "anonymize" {
-                let label = match entity.entity_type.as_str() {
-                    "EMAIL_ADDRESS" => "EMAIL",
-                    "PHONE_NUMBER" => "PHONE",
-                    "STREET_ADDRESS" => "ADDRESS",
-                    "POSTAL_CODE" => "POSTAL_CODE",
-                    "DATE_TIME" => "DATE",
-                    "CREDIT_CARD" => "CREDIT_CARD",
-                    "IBAN_CODE" => "IBAN",
-                    "IP_ADDRESS" => "IP_ADDRESS",
-                    "ID_NUMBER" => "ID",
-                    "INDIRECT_IDENTIFIER" => "INDIRECT_IDENTIFIER",
-                    category => category,
-                };
-                output.push('[');
-                output.push_str(label);
-                output.push(']');
+                let identity =
+                    temporary_identities.save_identity(&entity.entity_type, &entity.text, &text)?;
+                output.push_str(&identity.pseudonym);
             } else {
                 let identity = self.save_identity(&entity.entity_type, &entity.text, &text)?;
                 output.push_str(&identity.pseudonym);
@@ -556,30 +544,30 @@ mod tests {
                 "anonymize",
             )
             .unwrap();
-        assert_eq!(result.text, "[PERSON] met Jane");
+        assert_eq!(result.text, "PERSON_001 met Jane");
         assert!(vault.restore(&result.id).is_err());
         assert!(vault.pseudonyms.is_empty());
         assert!(vault.records.is_empty());
     }
 
     #[test]
-    fn anonymization_labels_all_categories_without_identity_numbers() {
+    fn anonymization_reuses_document_tokens_for_all_categories() {
         let mut vault = SessionVault::default();
         for (category, label) in [
             ("PERSON", "PERSON"),
             ("EMAIL_ADDRESS", "EMAIL"),
             ("PHONE_NUMBER", "PHONE"),
             ("LOCATION", "LOCATION"),
-            ("ORGANIZATION", "ORGANIZATION"),
+            ("ORGANIZATION", "ORG"),
             ("STREET_ADDRESS", "ADDRESS"),
-            ("POSTAL_CODE", "POSTAL_CODE"),
+            ("POSTAL_CODE", "POSTCODE"),
             ("DATE_TIME", "DATE"),
-            ("CREDIT_CARD", "CREDIT_CARD"),
+            ("CREDIT_CARD", "CARD"),
             ("IBAN_CODE", "IBAN"),
-            ("IP_ADDRESS", "IP_ADDRESS"),
+            ("IP_ADDRESS", "IP"),
             ("URL", "URL"),
             ("ID_NUMBER", "ID"),
-            ("INDIRECT_IDENTIFIER", "INDIRECT_IDENTIFIER"),
+            ("INDIRECT_IDENTIFIER", "DETAIL"),
         ] {
             let mut first = entity("1", "John", 0);
             first.entity_type = category.into();
@@ -588,9 +576,31 @@ mod tests {
             let result = vault
                 .process("John met John".into(), vec![first, second], "anonymize")
                 .unwrap();
-            assert_eq!(result.text, format!("[{label}] met [{label}]"));
+            assert_eq!(result.text, format!("{label}_001 met {label}_001"));
         }
         assert!(vault.records.is_empty());
+        assert!(vault.pseudonyms.is_empty());
+    }
+
+    #[test]
+    fn anonymization_distinguishes_people_and_resets_between_documents() {
+        let mut vault = SessionVault::default();
+        let result = vault
+            .process(
+                "John met John and Hiba".into(),
+                vec![
+                    entity("1", "John", 0),
+                    entity("2", "John", 9),
+                    entity("3", "Hiba", 18),
+                ],
+                "anonymize",
+            )
+            .unwrap();
+        assert_eq!(result.text, "PERSON_001 met PERSON_001 and PERSON_002");
+        let next = vault
+            .process("Hiba".into(), vec![entity("1", "Hiba", 0)], "anonymize")
+            .unwrap();
+        assert_eq!(next.text, "PERSON_001");
         assert!(vault.pseudonyms.is_empty());
     }
 
@@ -605,7 +615,7 @@ mod tests {
         let output = vault
             .process("John".into(), vec![entity("1", "John", 0)], "anonymize")
             .unwrap();
-        assert_eq!(output.text, "[PERSON]");
+        assert_eq!(output.text, "PERSON_001");
         assert_eq!(serde_json::to_value(&vault).unwrap(), before);
         assert!(vault.restore(&output.id).is_err());
         assert_eq!(vault.restore(&saved.id).unwrap(), "John");
@@ -642,36 +652,28 @@ mod tests {
                 "anonymize",
             )
             .unwrap();
-        assert_eq!(result.text, "😀[PERSON][PERSON]!");
+        assert_eq!(result.text, "😀PERSON_001PERSON_002!");
     }
 
     #[test]
     fn invalid_overlap_stale_empty_and_mode_requests_do_not_change_vault() {
         let mut vault = SessionVault::default();
-        assert!(
-            vault
-                .process(
-                    "John".into(),
-                    vec![entity("1", "John", 0), entity("2", "ohn", 1)],
-                    "pseudonymize"
-                )
-                .is_err()
-        );
-        assert!(
-            vault
-                .process("Jane".into(), vec![entity("1", "John", 0)], "pseudonymize")
-                .is_err()
-        );
-        assert!(
-            vault
-                .process("John".into(), vec![], "pseudonymize")
-                .is_err()
-        );
-        assert!(
-            vault
-                .process("John".into(), vec![entity("1", "John", 0)], "invalid")
-                .is_err()
-        );
+        assert!(vault
+            .process(
+                "John".into(),
+                vec![entity("1", "John", 0), entity("2", "ohn", 1)],
+                "pseudonymize"
+            )
+            .is_err());
+        assert!(vault
+            .process("Jane".into(), vec![entity("1", "John", 0)], "pseudonymize")
+            .is_err());
+        assert!(vault
+            .process("John".into(), vec![], "pseudonymize")
+            .is_err());
+        assert!(vault
+            .process("John".into(), vec![entity("1", "John", 0)], "invalid")
+            .is_err());
         assert!(vault.records.is_empty());
         assert!(vault.pseudonyms.is_empty());
     }
@@ -735,7 +737,7 @@ mod integration_tests {
             .unwrap();
         assert_eq!(
             anonymous.text,
-            "😀 Send to mira@example.com or copy [EMAIL]."
+            "😀 Send to mira@example.com or copy EMAIL_001."
         );
         assert!(vault.restore(&anonymous.id).is_err());
         let pseudo = vault
@@ -917,11 +919,9 @@ mod large_text_processing_tests {
             .unwrap();
         assert!(result.text.ends_with("PERSON_001"));
         assert_eq!(vault.restore(&result.id).unwrap(), source);
-        assert!(
-            vault
-                .process("x".repeat(500_001), vec![], "anonymize")
-                .is_err()
-        );
+        assert!(vault
+            .process("x".repeat(500_001), vec![], "anonymize")
+            .is_err());
         assert_eq!(vault.records.len(), 1);
     }
 }

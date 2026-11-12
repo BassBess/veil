@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyReviewDecision, matchKey, prepareProcessing } from "../src/reviewActions.ts";
+import { applyReviewDecision, groupDetections, matchKey, prepareProcessing } from "../src/reviewActions.ts";
 
 function item(source, value, id, category = "PERSON", status = "pending", from = 0) {
   const offset = source.indexOf(value, from);
@@ -92,4 +92,13 @@ test("accepted-only processing does not wait for an unresolved pending correctio
 test("normalization groups names only within their category", () => {
   assert.equal(matchKey({text:" John  Smith ",entity_type:"PERSON"}), matchKey({text:"JOHN SMITH",entity_type:"PERSON"}));
   assert.notEqual(matchKey({text:"John Smith",entity_type:"PERSON"}), matchKey({text:"John Smith",entity_type:"ORGANIZATION"}));
+});
+
+test("group repeated values while retaining occurrence decisions and categories", () => {
+  const source = "John met JOHN and Hiba";
+  const rows = [item(source, "John", "1"), item(source, "JOHN", "2", "PERSON", "rejected"), item(source, "Hiba", "3"), item(source, "John", "4", "ORGANIZATION")];
+  const groups = groupDetections(rows);
+  assert.deepEqual(groups.map(group => group.map(hit => hit.id)), [["1", "2"], ["3"], ["4"]]);
+  assert.equal(groups[0][1].status, "rejected");
+  assert.deepEqual(groupDetections(rows.filter(hit => hit.status === "rejected"))[0].map(hit => hit.id), ["2"]);
 });

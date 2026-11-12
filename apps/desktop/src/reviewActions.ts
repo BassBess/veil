@@ -3,6 +3,15 @@ export type ReviewItem = {
   status: "pending" | "accepted" | "rejected"; confidence: number | null; needsCorrection?: boolean;
 };
 type Decision = ReviewItem["status"];
+export function groupDetections<T extends ReviewItem>(items: T[]): T[][] {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const key = matchKey(item);
+    const group = groups.get(key);
+    if (group) group.push(item); else groups.set(key, [item]);
+  }
+  return [...groups.values()];
+}
 const foldedCategories = new Set(["PERSON", "ORGANIZATION", "LOCATION", "STREET_ADDRESS", "INDIRECT_IDENTIFIER"]);
 
 export function matchKey(item: Pick<ReviewItem, "entity_type" | "text">): string {

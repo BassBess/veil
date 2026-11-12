@@ -910,6 +910,10 @@ textarea:focus { background: white; }
 .repeat-choice { display:flex; gap:9px; align-items:center; margin-top:14px; font-size:13px; color:#294a69; }
 .repeat-choice input { accent-color:#234d78; }
 .entity-text .repeat-count { display:inline-block; margin:5px 0; font-size:11px; color:#345a80; background:#e8f0f8; border-radius:4px; padding:3px 7px; }
+.detected-text-link { display: block; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.detected-text-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.detected-text-link:focus-visible, .occurrence-button:focus-visible { outline: 2px solid #345a80; outline-offset: 3px; }
+.occurrence-button { border: 1px solid #c8d9e7; font: inherit; cursor: pointer; }
 .review-notice { padding:12px 16px; border-left:3px solid #3b698d; background:#f0f6fb; color:#2f526f; font-size:13px; line-height:1.6; }
 .review-pagination { justify-content:center; padding:16px 0; }
 .processing-options { justify-content:flex-end; width:100%; }

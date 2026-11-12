@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import { rebaseDetections } from "./rebaseDetections";
-import { applyReviewDecision, matchKey, prepareProcessing } from "./reviewActions";
+import { applyReviewDecision, groupDetections, matchKey, prepareProcessing } from "./reviewActions";
 
 type VaultStatus = { exists: boolean; unlocked: boolean; account_supported: boolean; authentication_required: boolean; code_required: boolean; needs_migration: boolean };
 type DetectionRule = { phrase: string; entity_type: string };
@@ -139,6 +139,7 @@ function App() {
   const [reviewCategory, setReviewCategory] = useState("all");
   const [linkRepeated, setLinkRepeated] = useState(true);
   const [reviewNotice, setReviewNotice] = useState("");
+  const [activeOccurrences, setActiveOccurrences] = useState<Record<string, string>>({});
   const [reviewPage, setReviewPage] = useState(0);
   const [importLimitMb, setImportLimitMb] = useState<number>(() => {
     try { const saved = Number(localStorage.getItem("veil.importLimitMb")); return [20, 50, 100].includes(saved) ? saved : 100; }
@@ -425,13 +426,10 @@ function App() {
     && (reviewCategory === "all" || item.entity_type === reviewCategory)
     && item.text.toLowerCase().includes(reviewQuery.trim().toLowerCase())
   ), [detections, reviewFilter, reviewCategory, reviewQuery]);
-  const repeatCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const item of detections) counts.set(matchKey(item), (counts.get(matchKey(item)) ?? 0) + 1);
-    return counts;
-  }, [detections]);
+  const reviewGroups = useMemo(() => groupDetections(filteredDetections), [filteredDetections]);
+  const visibleDetections = reviewGroups.map(group => group.find(item => item.id === activeOccurrences[matchKey(group[0])]) ?? group[0]);
   const textBytes = useMemo(() => new TextEncoder().encode(text).length, [text]);
-  const reviewPageCount = Math.max(1, Math.ceil(filteredDetections.length / 50));
+  const reviewPageCount = Math.max(1, Math.ceil(reviewGroups.length / 50));
   const visibleReviewPage = Math.min(reviewPage, reviewPageCount - 1);
   const editingDetection = detections.find((item) => item.id === editingId);
 
@@ -439,6 +437,26 @@ function App() {
     setEditingId(null);
     setManualSelection(null);
     setReviewError(""); setReviewNotice("");
+  }
+
+  function revealDetection(item: ReviewedDetection) {
+    const input = inputRef.current;
+    if (!input || item.needsCorrection) return;
+    const chars = Array.from(text);
+    input.focus();
+    input.setSelectionRange(chars.slice(0, item.start).join("").length, chars.slice(0, item.end).join("").length);
+    // Focus the selection within a long textarea as well as the page.
+    input.blur();
+    input.focus();
+    input.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function nextOccurrence(item: ReviewedDetection) {
+    const group = reviewGroups.find(group => matchKey(group[0]) === matchKey(item));
+    if (!group) return;
+    const next = group[(group.findIndex(hit => hit.id === item.id) + 1) % group.length];
+    setActiveOccurrences(current => ({ ...current, [matchKey(item)]: next.id }));
+    revealDetection(next);
   }
 
   function startEdit(item: ReviewedDetection) {
@@ -988,10 +1006,13 @@ function App() {
             <div className="empty-results">{analyzed ? "No sensitive information detected. Select text above to add missed information." : "Your detected information will appear here. Add your text and select Detect to get started."}</div>
           ) : (
             <div className="detection-list">
-              {filteredDetections.slice(visibleReviewPage * 50, (visibleReviewPage + 1) * 50).map((item) => (
+              {visibleDetections.slice(visibleReviewPage * 50, (visibleReviewPage + 1) * 50).map((item) => (
                 <div className={`detection-item ${item.status} ${editingId === item.id ? "editing" : ""}`} key={item.id}>
 
-                  <div className="entity-text"><strong>{item.text}</strong>{(repeatCounts.get(matchKey(item)) ?? 0) > 1 && <span className="repeat-count">{repeatCounts.get(matchKey(item))} matches</span>}<span className="review-status">{item.needsCorrection && item.status !== "rejected" ? "Text removed — edit or reject" : item.status === "pending" ? "Pending review" : item.status === "rejected" ? "Rejected" : "Accepted"}</span></div>
+                  <div className="entity-text"><button className="detected-text-link" disabled={loading || !!item.needsCorrection} onClick={() => revealDetection(item)} title="Show in document"><strong>{item.text}</strong></button>{(() => {
+                    const group = reviewGroups.find(group => matchKey(group[0]) === matchKey(item))!;
+                    return group.length > 1 && <button className="repeat-count occurrence-button" disabled={loading || editingId !== null} onClick={() => nextOccurrence(item)} title="Show next occurrence in document">{group.length} matches · {group.findIndex(hit => hit.id === item.id) + 1}/{group.length} ↗</button>;
+                  })()}<span className="review-status">{item.needsCorrection && item.status !== "rejected" ? "Text removed — edit or reject" : item.status === "pending" ? "Pending review" : item.status === "rejected" ? "Rejected" : "Accepted"}</span></div>
                   <select aria-label={`Category for ${item.text}`} value={item.entity_type} disabled={loading || editingId !== null} onChange={(event) => updateDetectionCategory(item.id, event.target.value)}>
                     {PRIVACY_CATEGORIES.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}
                   </select>
@@ -1006,9 +1027,9 @@ function App() {
               ))}
             </div>
           )}
-          {filteredDetections.length > 50 && <div className="review-pagination" aria-label="Detection pages">
+          {reviewGroups.length > 50 && <div className="review-pagination" aria-label="Detection pages">
             <button className="secondary-button" disabled={loading || visibleReviewPage === 0} onClick={() => setReviewPage(visibleReviewPage - 1)}>Previous</button>
-            <span>Page {visibleReviewPage + 1} of {reviewPageCount} - {filteredDetections.length} matching detections</span>
+            <span>Page {visibleReviewPage + 1} of {reviewPageCount} - {reviewGroups.length} matching groups</span>
             <button className="secondary-button" disabled={loading || visibleReviewPage + 1 >= reviewPageCount} onClick={() => setReviewPage(visibleReviewPage + 1)}>Next</button>
           </div>}
           <button className="add-button" disabled={!analyzed || loading || editingId !== null} onClick={() => { setSelectionHint(true); inputRef.current?.focus(); }}><Icon name="plus" />Add missed information</button>
