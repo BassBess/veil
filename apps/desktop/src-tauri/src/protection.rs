@@ -130,7 +130,22 @@ impl SessionVault {
         for entity in &approved {
             output.extend(chars[cursor..entity.start].iter());
             if mode == "anonymize" {
-                output.push_str("[REDACTED]");
+                let label = match entity.entity_type.as_str() {
+                    "EMAIL_ADDRESS" => "EMAIL",
+                    "PHONE_NUMBER" => "PHONE",
+                    "STREET_ADDRESS" => "ADDRESS",
+                    "POSTAL_CODE" => "POSTAL_CODE",
+                    "DATE_TIME" => "DATE",
+                    "CREDIT_CARD" => "CREDIT_CARD",
+                    "IBAN_CODE" => "IBAN",
+                    "IP_ADDRESS" => "IP_ADDRESS",
+                    "ID_NUMBER" => "ID",
+                    "INDIRECT_IDENTIFIER" => "INDIRECT_IDENTIFIER",
+                    category => category,
+                };
+                output.push('[');
+                output.push_str(label);
+                output.push(']');
             } else {
                 let identity = self.save_identity(&entity.entity_type, &entity.text, &text)?;
                 output.push_str(&identity.pseudonym);
@@ -541,10 +556,42 @@ mod tests {
                 "anonymize",
             )
             .unwrap();
-        assert_eq!(result.text, "[REDACTED] met Jane");
+        assert_eq!(result.text, "[PERSON] met Jane");
         assert!(vault.restore(&result.id).is_err());
         assert!(vault.pseudonyms.is_empty());
         assert!(vault.records.is_empty());
+    }
+
+    #[test]
+    fn anonymization_labels_all_categories_without_identity_numbers() {
+        let mut vault = SessionVault::default();
+        for (category, label) in [
+            ("PERSON", "PERSON"),
+            ("EMAIL_ADDRESS", "EMAIL"),
+            ("PHONE_NUMBER", "PHONE"),
+            ("LOCATION", "LOCATION"),
+            ("ORGANIZATION", "ORGANIZATION"),
+            ("STREET_ADDRESS", "ADDRESS"),
+            ("POSTAL_CODE", "POSTAL_CODE"),
+            ("DATE_TIME", "DATE"),
+            ("CREDIT_CARD", "CREDIT_CARD"),
+            ("IBAN_CODE", "IBAN"),
+            ("IP_ADDRESS", "IP_ADDRESS"),
+            ("URL", "URL"),
+            ("ID_NUMBER", "ID"),
+            ("INDIRECT_IDENTIFIER", "INDIRECT_IDENTIFIER"),
+        ] {
+            let mut first = entity("1", "John", 0);
+            first.entity_type = category.into();
+            let mut second = entity("2", "John", 9);
+            second.entity_type = category.into();
+            let result = vault
+                .process("John met John".into(), vec![first, second], "anonymize")
+                .unwrap();
+            assert_eq!(result.text, format!("[{label}] met [{label}]"));
+        }
+        assert!(vault.records.is_empty());
+        assert!(vault.pseudonyms.is_empty());
     }
 
     #[test]
@@ -558,7 +605,7 @@ mod tests {
         let output = vault
             .process("John".into(), vec![entity("1", "John", 0)], "anonymize")
             .unwrap();
-        assert_eq!(output.text, "[REDACTED]");
+        assert_eq!(output.text, "[PERSON]");
         assert_eq!(serde_json::to_value(&vault).unwrap(), before);
         assert!(vault.restore(&output.id).is_err());
         assert_eq!(vault.restore(&saved.id).unwrap(), "John");
@@ -595,7 +642,7 @@ mod tests {
                 "anonymize",
             )
             .unwrap();
-        assert_eq!(result.text, "😀[REDACTED][REDACTED]!");
+        assert_eq!(result.text, "😀[PERSON][PERSON]!");
     }
 
     #[test]
@@ -688,7 +735,7 @@ mod integration_tests {
             .unwrap();
         assert_eq!(
             anonymous.text,
-            "😀 Send to mira@example.com or copy [REDACTED]."
+            "😀 Send to mira@example.com or copy [EMAIL]."
         );
         assert!(vault.restore(&anonymous.id).is_err());
         let pseudo = vault
