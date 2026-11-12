@@ -1,4 +1,5 @@
 import spacy
+from veil_engine.context_rules import suggestions
 from tldextract import TLDExtract
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.predefined_recognizers import EmailRecognizer
@@ -20,6 +21,8 @@ class VeilDetector:
         "PHONE_NUMBER",
         "LOCATION",
         "ORGANIZATION",
+        "STREET_ADDRESS", "POSTAL_CODE", "DATE_TIME", "CREDIT_CARD", "IBAN_CODE",
+        "IP_ADDRESS", "URL", "ID_NUMBER", "INDIRECT_IDENTIFIER",
     }
 
     def __init__(self):
@@ -48,6 +51,7 @@ class VeilDetector:
         self,
         text: str,
         entities: list[str] | None = None,
+        rules: list[dict] | None = None,
     ) -> list[dict]:
 
         if not isinstance(text, str):
@@ -66,13 +70,11 @@ class VeilDetector:
             if not entities:
                 return []
 
-        results = self.analyzer.analyze(
-            text=text,
-            language="en",
-            entities=entities,
-        )
-
-        return [
+        enabled = set(entities if entities is not None else self.SUPPORTED_ENTITIES)
+        available = set(self.analyzer.get_supported_entities(language="en"))
+        builtin = sorted(enabled & available)
+        results = self.analyzer.analyze(text=text, language="en", entities=builtin) if builtin else []
+        detected = [
             {
                 "entity_type": result.entity_type,
                 "text": text[result.start:result.end],
@@ -86,17 +88,24 @@ class VeilDetector:
             )
         ]
 
+        doc = None
+        if enabled & {"ORGANIZATION", "INDIRECT_IDENTIFIER"}:
+            doc = self.analyzer.nlp_engine.process_text(text, "en").tokens
+        return detected + suggestions(text, enabled, rules, doc)
+
     def suggest(
         self,
         text: str,
         entities: list[str] | None = None,
+        rules: list[dict] | None = None,
     ) -> list[dict]:
 
-        candidates = self.detect(text, entities)
+        candidates = self.detect(text, entities, rules)
 
         ranked = sorted(
             candidates,
             key=lambda item: (
+                item["entity_type"] in {"STREET_ADDRESS", "POSTAL_CODE", "INDIRECT_IDENTIFIER"},
                 item["confidence"],
                 item["end"] - item["start"],
             ),

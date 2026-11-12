@@ -843,3 +843,57 @@ textarea:focus { background: white; }
 .sidebar::before { inset: 0 0 0 auto; width: 48%; height: 100%; transform: none; border: 0; border-radius: 0; clip-path: polygon(25% 0,100% 0,100% 100%,0 100%); background: linear-gradient(115deg,#97bddb35,#abcde91a); }
 .sidebar::after { inset: 0 0 0 auto; width: 24%; height: 100%; transform: none; border: 0; border-radius: 0; clip-path: polygon(40% 0,100% 0,100% 100%,0 100%); background: linear-gradient(120deg,#061a3652,#122c465e); }
 .sidebar .brand, .sidebar nav, .sidebar-bottom { position: relative; z-index: 1; }
+.processed-output { margin-top: 24px; padding: 24px; background: #fff; border: 1px solid #c9d9e6; border-radius: 7px; }
+.processed-output h2, .processed-output h3 { margin: 0 0 10px; color: #234663; font-size: 20px; }
+.processed-output p { font-size: 13px; color: #627a8e; line-height: 1.6; }
+.processed-output textarea { margin: 16px 0; min-height: 160px; }
+.vault-record { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 18px 0; border-bottom: 1px solid #dce6ee; }
+.vault-record > span { font-size: 13px; color: #5c748a; margin-right: auto; }
+.vault-unlock { max-width: 440px; padding: 24px; background: #f4f7fb; border: 1px solid #d2deea; border-radius: 7px; margin-top: 24px; }
+.vault-unlock h3 { margin: 0 0 20px; font-size: 19px; color: #254764; }
+.vault-unlock label, .identity-form label { display: flex; flex-direction: column; gap: 8px; color: #3e5b74; font-size: 13px; margin-bottom: 16px; }
+.vault-unlock input, .identity-form input, .identity-search { font: inherit; font-size: 14px; color: #233f59; padding: 11px 13px; min-height: 44px; border: 1px solid #bacddd; border-radius: 5px; background: white; }
+.vault-unlock .primary { width: 100%; }
+.vault-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 26px 0 18px; }
+.vault-heading h3 { color: #24445f; font-size: 19px; margin: 0; }
+.identity-form { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; padding: 18px; background: #f3f7fb; border-radius: 6px; border: 1px solid #dce5ed; }
+.identity-form label { flex: 1; margin: 0; min-width: 160px; }
+.identity-form select { min-height: 44px; background-color: white; }
+.identity-search { display: block; width: 100%; margin: 20px 0 0; }
+.identity-row { display: flex; align-items: center; gap: 18px; padding: 18px 0; border-bottom: 1px solid #dce5ed; flex-wrap: wrap; }
+.identity-row > div { flex: 1; min-width: 140px; }
+.identity-row strong { display: block; color: #203e59; font-size: 14px; overflow-wrap: anywhere; }
+.identity-row span { display: block; margin-top: 5px; font-size: 12px; color: #71879a; }
+.identity-row code { background: #e9f1f7; color: #2b5678; padding: 7px 10px; border-radius: 4px; font-size: 13px; }
+.vault-lock-note { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 15px 18px; margin: 0 0 20px; border: 1px solid #c8d9e7; border-radius: 6px; background: #f7fafc; color: #46637b; font-size: 13px; }
+.vault-lock-note span { flex: 1; }
+.vault-lock-note > svg { color: #2c5578; flex-shrink: 0; }
+@font-face { font-family: "Archivo Black"; src: url("./assets/fonts/ArchivoBlack-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Archivo Narrow"; src: url("./assets/fonts/ArchivoNarrow.ttf") format("truetype"); font-weight: 400 700; font-display: swap; }
+.brand > span { font-family: "Archivo Black", sans-serif; font-size: 27px; font-weight: 400; letter-spacing: .12em; }
+.sidebar .nav-item { font-family: "Archivo Narrow", sans-serif; font-size: 16px; font-weight: 600; letter-spacing: .035em; }
+.drop-instruction { display: flex; align-items: center; gap: 10px; color: #5a758d; padding: 13px 16px; margin-bottom: 14px; border: 1px dashed #9fb9d0; border-radius: 5px; background: #f5f9fc; font-size: 13px; }
+.input-section.drag-active { border-color: #376f9a; box-shadow: 0 0 0 3px #5189b52e; background: #f3f9fd; }
+.input-section.drag-active .drop-instruction { background: #dcecf8; color: #234c6b; border-color: #3d7198; }
+.settings-category-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(210px,1fr)); gap: 10px; margin-bottom: 20px; }
+.settings-form { padding: 20px; border: 1px solid #d4e1ec; border-radius: 6px; background: #f7fafc; margin: 16px 0 28px; }
+.settings-form label { display: block; color: #3b5973; font-size: 14px; margin-bottom: 12px; }
+.settings-form label input[type=radio] { margin-right: 10px; accent-color: #254e72; }
+.settings-form input[type=password] { display: block; font: inherit; min-height: 42px; padding: 10px; margin-top: 8px; border: 1px solid #adc3d6; border-radius: 4px; width: min(100%,380px); }
+.settings-form p { margin: 8px 0 18px; }
+.settings-form textarea { min-height: 100px; margin-top: 10px; font-size: 14px; }
+.data-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0; }
+.danger-button { display: inline-flex; align-items: center; padding: 11px 17px; border-radius: 5px; border: 1px solid #a22c40; background: #a72c40; color: white; font: inherit; font-size: 13px; cursor: pointer; }
+.danger-button:hover:enabled { background: #8d2033; }
+.reset-dialog { width: min(540px,90vw); padding: 28px; border: 2px solid #b2384b; border-radius: 9px; box-shadow: 0 18px 70px #10223659; color: #283d50; }
+.reset-dialog::backdrop { background: #10233699; }
+.reset-dialog h2 { color: #9c2338; margin-top: 0; font-size: 23px; }
+.reset-dialog p { font-size: 14px; line-height: 1.65; }
+.reset-warning { padding: 14px; border: 1px solid #e4a3ad; background: #fff0f2; color: #8c2336; border-radius: 5px; }
+.reset-dialog label { display: block; font-size: 14px; font-weight: 600; }
+.reset-dialog input { display: block; width: 100%; padding: 12px; margin-top: 10px; border: 1px solid #ba7d89; border-radius: 4px; font: inherit; }
+.view-details > h3 { color: #254762; margin-top: 28px; }
+.category-picker { position: relative; font-size: 13px; color: #3f5d77; }
+.category-picker summary { cursor: pointer; padding: 11px 14px; background: #f0f5f9; border: 1px solid #c5d5e3; border-radius: 5px; }
+.category-picker[open] { flex-basis: 100%; }
+.category-picker .privacy-categories { margin-top: 12px; padding: 12px; border: 1px solid #d4e0eb; border-radius: 5px; background: #f8fafc; }
