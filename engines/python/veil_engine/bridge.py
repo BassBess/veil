@@ -6,6 +6,13 @@ def main():
     try:
         request = json.load(sys.stdin)
 
+        if request.get("action") == "export_pdf":
+            import base64
+            from veil_engine.pdf_export import export_pdf
+            data = export_pdf(request["text"])
+            json.dump({"pdf": base64.b64encode(data).decode("ascii")}, sys.stdout)
+            return
+
         if request.get("action") == "parse_document":
             from veil_engine.document_parser import DocumentError, parse_document
             try:
@@ -24,6 +31,7 @@ def main():
         results = detector.suggest(
             text,
             entities,
+            request.get("rules"),
         )
 
         json.dump(

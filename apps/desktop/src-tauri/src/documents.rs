@@ -305,3 +305,60 @@ mod tests {
         assert_eq!(parse_path(&file.0).unwrap_err().code, "invalid_file");
     }
 }
+
+#[derive(Default)]
+pub struct DroppedDocuments(pub std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>);
+
+impl DroppedDocuments {
+    pub fn authorize(&self, paths: Vec<std::path::PathBuf>) {
+        if let Ok(mut allowed) = self.0.lock() {
+            *allowed = paths.into_iter().collect();
+        }
+    }
+
+    fn consume(&self, path: &std::path::Path) -> Result<(), DocumentError> {
+        let mut allowed = self
+            .0
+            .lock()
+            .map_err(|_| DocumentError::new("drop_unavailable", "Unable to read dropped files"))?;
+        if !allowed.remove(path) {
+            return Err(DocumentError::new(
+                "invalid_drop",
+                "Drop the document into Veil again.",
+            ));
+        }
+        allowed.clear();
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub async fn parse_dropped_document(
+    path: String,
+    dropped: tauri::State<'_, DroppedDocuments>,
+) -> Result<ParsedDocument, DocumentError> {
+    let path = std::path::PathBuf::from(path);
+    dropped.consume(&path)?;
+    tauri::async_runtime::spawn_blocking(move || parse_path(&path))
+        .await
+        .map_err(|_| {
+            DocumentError::new(
+                "engine_failed",
+                "The document import task stopped unexpectedly",
+            )
+        })?
+}
+
+#[cfg(test)]
+mod dropped_tests {
+    use super::*;
+    #[test]
+    fn accepts_only_an_actual_native_drop_once() {
+        let dropped = DroppedDocuments::default();
+        let path = std::path::PathBuf::from("test.pdf");
+        assert!(dropped.consume(&path).is_err());
+        dropped.authorize(vec![path.clone()]);
+        assert!(dropped.consume(&path).is_ok());
+        assert!(dropped.consume(&path).is_err());
+    }
+}

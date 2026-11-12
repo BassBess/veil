@@ -51,6 +51,25 @@ class TestDocumentParser(unittest.TestCase):
     def test_binary_txt(self):
         self.assert_error(self.write('binary.txt', b'abc\x00def'), 'invalid_file')
 
+    def test_docx_headers_footers_and_linked_sections(self):
+        document = Document()
+        document.sections[0].header.paragraphs[0].text = "Contact Jane Smith"
+        document.sections[0].footer.paragraphs[0].text = "jane@example.com"
+        document.sections[0].first_page_header.paragraphs[0].text = "Private cover"
+        document.sections[0].even_page_footer.paragraphs[0].text = "Office 555-0100"
+        document.add_paragraph("Body text")
+        document.add_section()
+        document.add_paragraph("Second section")
+        path = self.root / "headers.docx"
+        document.save(path)
+
+        text = parse_document(path)["text"]
+        for value in ("Contact Jane Smith", "jane@example.com", "Private cover",
+                      "Office 555-0100", "Body text", "Second section"):
+            self.assertEqual(text.count(value), 1)
+        self.assertLess(text.index("Contact Jane Smith"), text.index("Body text"))
+        self.assertLess(text.index("Second section"), text.index("jane@example.com"))
+
     def test_docx_paragraph_table_order(self):
         document = Document()
         document.add_paragraph('Before')

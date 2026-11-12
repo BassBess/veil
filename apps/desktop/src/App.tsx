@@ -1,8 +1,14 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import { rebaseDetections } from "./rebaseDetections";
 
+type VaultStatus = { exists: boolean; unlocked: boolean; account_supported: boolean; authentication_required: boolean; code_required: boolean; needs_migration: boolean };
+type DetectionRule = { phrase: string; entity_type: string };
+type SavedIdentity = { id: string; entity_type: string; original: string; pseudonym: string };
+type ProcessedRecord = { id: string; mode: string; text: string; count: number };
 type Detection = {
   entity_type: string;
   text: string;
@@ -60,6 +66,15 @@ const PRIVACY_CATEGORIES: PrivacyCategory[] = [
   { label: "Phone numbers", value: "PHONE_NUMBER" },
   { label: "Locations", value: "LOCATION" },
   { label: "Organizations", value: "ORGANIZATION" },
+  { label: "Street addresses", value: "STREET_ADDRESS" },
+  { label: "ZIP / postal codes", value: "POSTAL_CODE" },
+  { label: "Dates and times", value: "DATE_TIME" },
+  { label: "Credit card numbers", value: "CREDIT_CARD" },
+  { label: "IBAN bank accounts", value: "IBAN_CODE" },
+  { label: "IP addresses", value: "IP_ADDRESS" },
+  { label: "Website links", value: "URL" },
+  { label: "Labeled ID numbers", value: "ID_NUMBER" },
+  { label: "Indirect identifiers", value: "INDIRECT_IDENTIFIER" },
 ];
 
 function rangesOverlap(
@@ -69,10 +84,12 @@ function rangesOverlap(
   return first.start < second.end && first.end > second.start;
 }
 
-type IconName = "home" | "database" | "vault" | "settings" | "arrow" | "plus" | "edit" | "trash";
+type IconName = "document" | "upload" | "home" | "database" | "vault" | "settings" | "arrow" | "plus" | "edit" | "trash";
 
 function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
+    document: <><path d="M14 3H5v18h14V8Z" /><path d="M14 3v5h5M8 12h8M8 16h6" /></>,
+    upload: <><path d="M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5" /></>,
     home: <><path d="m3 10 9-7 9 7" /><path d="M5 9v12h5v-7h4v7h5V9" /></>,
     database: <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0" /></>,
     vault: <><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="12" cy="11" r="3" /><path d="M12 14v3" /></>,
@@ -86,6 +103,37 @@ function Icon({ name }: { name: IconName }) {
 }
 
 function App() {
+  const [vaultProtection, setVaultProtection] = useState<"account" | "system" | "passphrase">("system");
+  const [savedRules, setSavedRules] = useState<DetectionRule[]>([]);
+  const [settingsMessage, setSettingsMessage] = useState("");
+  const [resetError, setResetError] = useState("");
+  const importInFlightRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
+  const resetDialogRef = useRef<HTMLDialogElement>(null);
+  const resetConfirmationRef = useRef<HTMLInputElement>(null);
+  const protectionPasswordRef = useRef<HTMLInputElement>(null);
+  const protectionConfirmRef = useRef<HTMLInputElement>(null);
+  const rulesRef = useRef<HTMLTextAreaElement>(null);
+  const dropRegionRef = useRef<HTMLElement>(null);
+  const [vaultStatus, setVaultStatus] = useState<VaultStatus>({ exists: false, unlocked: false, account_supported: false, authentication_required: false, code_required: false, needs_migration: false });
+  const vaultLoadRef = useRef(0);
+  const [vaultBusy, setVaultBusy] = useState(false);
+  const [savedIdentities, setSavedIdentities] = useState<SavedIdentity[]>([]);
+  const [identityQuery, setIdentityQuery] = useState("");
+  const [identityCategory, setIdentityCategory] = useState("PERSON");
+  const vaultPasswordRef = useRef<HTMLInputElement>(null);
+  const vaultConfirmRef = useRef<HTMLInputElement>(null);
+  const identityNameRef = useRef<HTMLInputElement>(null);
+  const [processed, setProcessed] = useState<{record: ProcessedRecord; snapshot: string; mode: string} | null>(null);
+  const [vaultRecords, setVaultRecords] = useState<ProcessedRecord[]>([]);
+  const [vaultError, setVaultError] = useState("");
+  const [restoredText, setRestoredText] = useState<string | null>(null);
+  const [exportMessage, setExportMessage] = useState("");
+
+
+  const [workspaceView, setWorkspaceView] = useState("Anonymize");
+  const [reviewQuery, setReviewQuery] = useState("");
+  const [reviewFilter, setReviewFilter] = useState("all");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [selectionHint, setSelectionHint] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -103,9 +151,18 @@ function App() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState("");
 
-  const [selectedEntities, setSelectedEntities] = useState<string[]>(
-    PRIVACY_CATEGORIES.map((category) => category.value)
-  );
+  const [selectedEntities, setSelectedEntities] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("veil.detectionCategories") ?? "null");
+      if (Array.isArray(saved)) return saved.filter((value) => PRIVACY_CATEGORIES.some((category) => category.value === value));
+    } catch { /* Use defaults when local preferences are unavailable. */ }
+    return PRIVACY_CATEGORIES.slice(0, 5).map((category) => category.value);
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem("veil.detectionCategories", JSON.stringify(selectedEntities)); }
+    catch { /* Detection remains available without saved preferences. */ }
+  }, [selectedEntities]);
 
   const [manualSelection, setManualSelection] =
     useState<ManualSelection | null>(null);
@@ -118,7 +175,236 @@ function App() {
     message: string;
   } | null>(null);
 
-  const reviewSnapshot = JSON.stringify([text, detections]);
+  const reviewSnapshot = JSON.stringify([text, detections, workspaceView]);
+
+  const refreshVault = useCallback(() => {
+    const request = ++vaultLoadRef.current;
+    return invoke<VaultStatus>("vault_status").then(async (status) => {
+      if (request !== vaultLoadRef.current) return;
+      if (status.unlocked) {
+        const [records, identities, rules] = await Promise.all([
+          invoke<ProcessedRecord[]>("list_vault_records"),
+          invoke<SavedIdentity[]>("list_saved_identities"),
+          invoke<DetectionRule[]>("list_detection_rules"),
+        ]);
+        if (request !== vaultLoadRef.current) return;
+        setVaultRecords(records);
+        setSavedIdentities(identities);
+        setSavedRules(rules);
+      } else {
+        setVaultRecords([]);
+        setSavedIdentities([]);
+        setRestoredText(null);
+      }
+      if (status.exists) setVaultProtection(status.code_required ? "passphrase" : status.authentication_required ? "system" : "account");
+      else if (!status.account_supported) setVaultProtection("passphrase");
+      setVaultStatus(status);
+    }).catch((error) => {
+      if (request === vaultLoadRef.current) setVaultError(String(error));
+    });
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    invoke<VaultStatus>("vault_status").then((status) => {
+      if (active) { setVaultStatus(status); if (!status.account_supported) setVaultProtection("passphrase"); else if (status.exists) setVaultProtection(status.code_required ? "passphrase" : status.authentication_required ? "system" : "account"); if (status.unlocked) void refreshVault(); }
+    }).catch((error) => { if (active) setVaultError(String(error)); });
+    return () => { active = false; };
+  }, [refreshVault]);
+
+  async function unlockVault(event: React.FormEvent) {
+    event.preventDefault();
+    const password = vaultPasswordRef.current?.value ?? "";
+    const confirmation = vaultConfirmRef.current?.value ?? "";
+    const needsCode = vaultStatus.code_required || (!vaultStatus.exists && (vaultProtection === "passphrase" || !vaultStatus.account_supported));
+    if (needsCode && !vaultStatus.exists && password !== confirmation) {
+      setVaultError("The passphrases do not match.");
+      return;
+    }
+    setVaultBusy(true);
+    setVaultError("");
+    try {
+      await invoke("unlock_vault", { password: needsCode ? password : "", create: !vaultStatus.exists, useAccount: vaultStatus.exists ? !vaultStatus.code_required : vaultProtection !== "passphrase" && vaultStatus.account_supported, requireAuthentication: vaultProtection === "system" });
+      await refreshVault();
+    } catch (error) { setVaultError(String(error)); }
+    finally {
+      if (vaultPasswordRef.current) vaultPasswordRef.current.value = "";
+      if (vaultConfirmRef.current) vaultConfirmRef.current.value = "";
+      setVaultBusy(false);
+    }
+  }
+
+  async function lockVault() {
+    ++vaultLoadRef.current;
+    setVaultBusy(true);
+    try {
+      await invoke("lock_vault");
+      setRestoredText(null);
+      setSavedIdentities([]);
+      setVaultRecords([]);
+      setProcessed(null);
+      await refreshVault();
+    } catch (error) { setVaultError(String(error)); }
+    finally { setVaultBusy(false); }
+  }
+
+  async function addIdentity(event: React.FormEvent) {
+    event.preventDefault();
+    setVaultBusy(true);
+    setVaultError("");
+    try {
+      await invoke("save_identity", {
+        original: identityNameRef.current?.value ?? "",
+        entityType: identityCategory,
+      });
+      if (identityNameRef.current) identityNameRef.current.value = "";
+      await refreshVault();
+    } catch (error) { setVaultError(String(error)); }
+    finally { setVaultBusy(false); }
+  }
+
+  async function applySavedIdentity(id: string) {
+    setLoading(true);
+    setVaultError("");
+    try {
+      const found = await invoke<ValidatedDetection[]>("find_saved_identity", { id, text });
+      if (!found.length) {
+        setVaultError("No matches in the current document. Paste or upload a document containing this identity first.");
+        return;
+      }
+      const additions = found.filter((hit) => !detections.some((item) =>
+        item.status !== "rejected" && rangesOverlap(hit, item)));
+      setDetections((current) => [...current, ...additions.map((item) => ({
+        ...item, status: "pending" as ReviewStatus, confidence: null,
+      }))].sort((a, b) => a.start - b.start));
+      setAnalyzed(true);
+      setProcessed(null);
+      setValidation(null);
+      setReviewError("");
+      setWorkspaceView("Pseudonymize");
+    } catch (error) { setVaultError(String(error)); }
+    finally { setLoading(false); }
+  }
+
+
+  async function changeProtection(event: React.FormEvent) {
+    event.preventDefault();
+    const password = protectionPasswordRef.current?.value ?? "";
+    if (vaultProtection === "passphrase" && password !== protectionConfirmRef.current?.value) {
+      setVaultError("The passphrases do not match."); return;
+    }
+    setVaultBusy(true); setVaultError(""); setSettingsMessage("");
+    try {
+      await invoke("set_vault_protection", { useAccount: vaultProtection !== "passphrase", requireAuthentication: vaultProtection === "system", password });
+      await refreshVault();
+      setSettingsMessage("Vault protection updated. Saved identities and documents were kept.");
+    } catch (error) { setVaultError(String(error)); }
+    finally {
+      if (protectionPasswordRef.current) protectionPasswordRef.current.value = "";
+      if (protectionConfirmRef.current) protectionConfirmRef.current.value = "";
+      setVaultBusy(false);
+    }
+  }
+
+  async function saveRules(event: React.FormEvent) {
+    event.preventDefault();
+    const rules = (rulesRef.current?.value ?? "").split("\n").map((phrase) => phrase.trim())
+      .filter(Boolean).map((phrase) => ({ phrase, entity_type: "INDIRECT_IDENTIFIER" }));
+    setVaultBusy(true); setVaultError(""); setSettingsMessage("");
+    try {
+      await invoke("save_detection_rules", { rules });
+      setSavedRules(rules);
+      if (rules.length) setSelectedEntities((current) => [...new Set([...current, "INDIRECT_IDENTIFIER"])]);
+      setSettingsMessage("Custom phrases saved.");
+    } catch (error) { setVaultError(String(error)); }
+    finally { setVaultBusy(false); }
+  }
+
+  function clearWorkspace() {
+    if (!window.confirm("Clear the current document, review decisions, and preview? Saved Vault data will be kept.")) return;
+    replaceDocumentText("");
+    setImportedDocument(null); setProcessed(null); setRestoredText(null);
+    setExportMessage(""); setReviewQuery(""); setReviewFilter("all");
+  }
+
+  async function resetVault(event: React.FormEvent) {
+    event.preventDefault();
+    const confirmation = resetConfirmationRef.current?.value ?? "";
+    setVaultBusy(true); setResetError("");
+    try {
+      await invoke("reset_vault", { confirmation });
+      ++vaultLoadRef.current;
+      setVaultRecords([]); setSavedIdentities([]); setSavedRules([]);
+      if (rulesRef.current) rulesRef.current.value = "";
+      if (identityNameRef.current) identityNameRef.current.value = "";
+      setExportMessage("");
+      setProcessed(null); setRestoredText(null); setIdentityQuery("");
+      setSettingsMessage("Vault reset. Saved identities, mappings, rules, and history were cleared.");
+      await refreshVault();
+      resetDialogRef.current?.close();
+      if (resetConfirmationRef.current) resetConfirmationRef.current.value = "";
+    } catch (error) { setResetError(String(error)); }
+    finally { setVaultBusy(false); }
+  }
+
+  const onNativeDrop = useEffectEvent((payload: { type: string; paths?: string[]; position?: { x: number; y: number } }, scale: number) => {
+    const area = dropRegionRef.current?.getBoundingClientRect();
+    const point = payload.position;
+    const inside = !!area && !!point && point.x / scale >= area.left && point.x / scale <= area.right
+      && point.y / scale >= area.top && point.y / scale <= area.bottom;
+    if (payload.type === "leave") { setDragging(false); return; }
+    if (payload.type === "enter" || payload.type === "over") {
+      setDragging(inside && !loading); return;
+    }
+    if (payload.type === "drop") {
+      setDragging(false);
+      if (!inside || loading || workspaceView === "Vault" || workspaceView === "Settings") return;
+      if (payload.paths?.length !== 1) { setImportError("Drop one document at a time."); return; }
+      void uploadDocument(payload.paths[0]);
+    }
+  });
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const connect = async () => {
+      try {
+        const scale = await getCurrentWindow().scaleFactor();
+        const stop = await getCurrentWebview().onDragDropEvent((event) => onNativeDrop(event.payload, scale));
+        if (disposed) stop(); else unlisten = stop;
+      } catch { /* Browser previews use the native upload button in the desktop app. */ }
+    };
+    void connect();
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+
+  async function exportText(value: string, format = "txt") {
+    setExportMessage("");
+    try {
+      const saved = await invoke<boolean>("export_processed_text", { text: value, format });
+      setExportMessage(saved ? "Text file saved." : "");
+    } catch (error) { setExportMessage(String(error)); }
+  }
+
+  async function restoreRecord(id: string) {
+    setVaultError("");
+    setRestoredText(null);
+    try { setRestoredText(await invoke<string>("restore_vault_record", { id })); }
+    catch (error) { setVaultError(String(error)); }
+  }
+
+  async function clearVault() {
+    if (!window.confirm("Clear saved document history? Document restoration will no longer be available. Your saved identities and pseudonyms will be kept.")) return;
+    try {
+      await invoke("clear_vault_records");
+      setVaultRecords([]);
+      setRestoredText(null);
+      setProcessed(null);
+      setVaultError("");
+    } catch (error) { setVaultError(String(error)); }
+  }
+
 
 
   const editingDetection = detections.find((item) => item.id === editingId);
@@ -192,13 +478,14 @@ function App() {
     setImportError("");
   }
 
-  async function uploadDocument() {
-    if (loading) return;
+  async function uploadDocument(droppedPath?: string) {
+    if (loading || importInFlightRef.current) return;
+    importInFlightRef.current = true;
     setLoading(true);
     setImporting(true);
     setImportError("");
     try {
-      const document = await invoke<ParsedDocument | null>("parse_document");
+      const document = droppedPath ? await invoke<ParsedDocument>("parse_dropped_document", { path: droppedPath }) : await invoke<ParsedDocument | null>("parse_document");
       // Cancellation and failures preserve the current text and review decisions.
       if (document) {
         replaceDocumentText(document.text);
@@ -209,6 +496,7 @@ function App() {
     } finally {
       setLoading(false);
       setImporting(false);
+      importInFlightRef.current = false;
     }
   }
 
@@ -386,7 +674,7 @@ function App() {
     setSelectionHint(false);
 
     try {
-      const response = await invoke<DetectionResponse>("detect_pii", {
+      const response = await invoke<DetectionResponse>("detect_with_rules", {
         text,
         entities: selectedEntities,
       });
@@ -410,7 +698,7 @@ function App() {
 
 
   async function validateAcceptedDetections() {
-    if (loading || !analyzed) return;
+    if (loading || !analyzed || !vaultStatus.unlocked) return;
 
     const accepted: ValidatedDetection[] = detections
       .filter((item) => item.status === "accepted")
@@ -428,31 +716,34 @@ function App() {
       setValidation({
         snapshot: reviewSnapshot,
         success: false,
-        message: "Please accept or reject all detections before validation.",
+        message: "Please accept or reject all detections before processing.",
       });
       return;
     }
 
     const snapshot = reviewSnapshot;
+    setProcessed(null);
     setLoading(true);
     setValidation(null);
 
     try {
-      const result = await invoke<ValidatedDetection[]>(
-        "validate_reviewed_detections",
-        { text, detections: accepted }
-      );
+      const mode = workspaceView === "Pseudonymize" ? "pseudonymize" : "anonymize";
+      const result = await invoke<ProcessedRecord>("process_reviewed_text", {
+        text, detections: accepted, mode,
+      });
+      setProcessed({record: result, snapshot, mode: workspaceView});
+      setExportMessage("");
 
       setValidation({
         snapshot,
         success: true,
-        message: `${result.length} accepted detection(s) passed backend validation.`,
+        message: `${result.count} accepted item(s) processed.`,
       });
     } catch (err) {
       setValidation({
         snapshot,
         success: false,
-        message: `Validation failed: ${String(err)}`,
+        message: `Processing failed: ${String(err)}`,
       });
     } finally {
       setLoading(false);
@@ -460,48 +751,133 @@ function App() {
   }
 
   return (
-    <div className="app">
-      <aside className="sidebar">
+    <div className="app" aria-busy={loading}>
+      <header className="sidebar">
         <div className="brand">
-          <svg className="logo" viewBox="0 0 44 48" aria-hidden="true">
-            <defs><linearGradient id="shield" x2="1" y2="1"><stop stopColor="#9870e0" /><stop offset="1" stopColor="#3f168b" /></linearGradient></defs>
-            <path fill="url(#shield)" d="M22 2 40 9v13c0 12-8 19-18 24C12 41 4 34 4 22V9Z" />
-            <path fill="#d5c1f4" d="m4 9 18 8v20C12 33 8 27 8 19Z" />
-            <path fill="#ffffff" opacity=".85" d="m22 17 10-5v11c0 6-4 11-10 14Z" />
-          </svg>
-          <span>Veil</span>
+          <div className={`vault-mark vault-reactive ${workspaceView === "Vault" ? "is-open" : ""}`} aria-hidden="true">
+            <div className="vault-door"><span className="vault-wheel"><i /><i /></span><span className="vault-handle" /></div>
+          </div>
+          <span>VEIL</span>
         </div>
         <nav aria-label="Main navigation">
-          <button className="nav-item active" aria-current="page"><Icon name="home" />Anonymize</button>
-          <button className="nav-item" disabled title="Coming soon"><Icon name="database" />Pseudonymize</button>
-          <button className="nav-item" disabled title="Coming soon"><Icon name="vault" />Vault</button>
-          <button className="nav-item" disabled title="Coming soon"><Icon name="settings" />Settings</button>
+          {["Anonymize", "Pseudonymize", "Vault", "Settings"].map((view) => (
+            <button key={view} disabled={loading || vaultBusy} className={`nav-item ${workspaceView === view ? "active" : ""}`} aria-current={workspaceView === view ? "page" : undefined} onClick={() => { setWorkspaceView(view); void refreshVault(); setRestoredText(null); setVaultError(""); setExportMessage(""); }}>
+              <Icon name={view === "Vault" ? "vault" : view === "Settings" ? "settings" : view === "Pseudonymize" ? "database" : "home"} />{view}
+            </button>
+          ))}
         </nav>
         <div className="sidebar-bottom"><span className="local-dot" />Processed locally on your device</div>
         <div className="sidebar-wave" aria-hidden="true" />
-      </aside>
+      </header>
 
       <main className="workspace">
         <header className="intro">
-          <h1>Protect Sensitive Information</h1>
-          <p>Detect, review, and transform personal data in your text.</p>
+          <h1>{workspaceView === "Anonymize" ? "Anonymization workspace" : workspaceView === "Pseudonymize" ? "Pseudonymization workspace" : workspaceView}</h1>
+          <p>{workspaceView === "Vault" ? "Your saved people, pseudonyms, and processed documents." : workspaceView === "Settings" ? "Manage your detection preferences." : "Inspect your documents and review sensitive information before sharing."}</p>
         </header>
 
-        <section aria-label="Document and detection settings" className="input-section">
+        {(workspaceView === "Vault" || workspaceView === "Settings") && <section className="view-details">
+          {workspaceView === "Vault" && <>
+            <div className="vault-display" aria-hidden="true"><div className="vault-mark is-open"><div className="vault-door"><span className="vault-wheel"><i /><i /></span><span className="vault-handle" /></div></div></div>
+            <h2>Your Vault</h2>
+            <p>People and identity mappings are saved locally in an encrypted Vault. Their pseudonyms remain the same when you reopen Veil.</p>
+            {vaultError && <div className="error" role="alert">{vaultError}</div>}
+            {!vaultStatus.unlocked ? <form className="vault-unlock" onSubmit={unlockVault}>
+              <h3>{vaultStatus.exists ? "Unlock your Vault" : "Create your Vault"}</h3>
+              {(vaultStatus.code_required || (!vaultStatus.exists && (vaultProtection === "passphrase" || !vaultStatus.account_supported))) && <>
+                <label>Passphrase<input ref={vaultPasswordRef} type="password" autoComplete={vaultStatus.exists ? "current-password" : "new-password"} required minLength={vaultStatus.exists ? 1 : 12} maxLength={1024} disabled={vaultBusy} /></label>
+                {!vaultStatus.exists && <label>Confirm passphrase<input ref={vaultConfirmRef} type="password" autoComplete="new-password" required minLength={12} maxLength={1024} disabled={vaultBusy} /></label>}
+              </>}
+              <p>{vaultStatus.code_required ? "Enter your Vault passphrase. You can change password protection in Settings after unlocking." : vaultProtection === "passphrase" ? "Keep this passphrase to reopen your encrypted Vault." : vaultProtection === "system" ? "Your computer will ask you to verify with Windows Hello or macOS sign-in. VEIL never receives your system password or biometric data." : "Protected by your signed-in account on this computer, with no separate Vault password."}</p>
+              <button className="primary" type="submit" disabled={vaultBusy}>{vaultBusy ? "Opening Vault..." : vaultStatus.authentication_required || (!vaultStatus.exists && vaultProtection === "system") ? "Verify with system sign-in" : vaultStatus.exists ? "Unlock Vault" : "Create Vault"}</button>
+            </form> : <>
+              <div className="vault-heading"><h3>Saved identities</h3><button className="secondary-button" disabled={vaultBusy || loading} onClick={lockVault}><Icon name="vault" />Lock Vault</button></div>
+              <form className="identity-form" onSubmit={addIdentity}>
+                <label>Name or identifying text<input ref={identityNameRef} placeholder="John Smith" required maxLength={1000} disabled={vaultBusy || loading} /></label>
+                <label>Category<select value={identityCategory} onChange={(event) => setIdentityCategory(event.target.value)} disabled={vaultBusy || loading}>{PRIVACY_CATEGORIES.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select></label>
+                <button className="primary" type="submit" disabled={vaultBusy || loading}><Icon name="plus" />Save identity</button>
+              </form>
+              <input className="identity-search" type="search" aria-label="Search saved identities" placeholder="Search by name or pseudonym" value={identityQuery} onChange={(event) => setIdentityQuery(event.target.value)} />
+              <div className="identity-list">{savedIdentities.filter((identity) => (identity.original + " " + identity.pseudonym).toLowerCase().includes(identityQuery.toLowerCase())).map((identity) =>
+                <div className="identity-row" key={identity.id}><div><strong>{identity.original}</strong><span>{PRIVACY_CATEGORIES.find((category) => category.value === identity.entity_type)?.label}</span></div><code>{identity.pseudonym}</code><button className="secondary-button" disabled={loading || vaultBusy || !text.trim()} onClick={() => applySavedIdentity(identity.id)}>Find in current document</button></div>
+              )}</div>
+              {!savedIdentities.length && <p>Save an identity above, or pseudonymize reviewed information to add it automatically.</p>}
+              {savedIdentities.length > 0 && !savedIdentities.some((identity) => (identity.original + " " + identity.pseudonym).toLowerCase().includes(identityQuery.toLowerCase())) && <p>No saved identities match your search.</p>}
+              <div className="vault-heading"><h3>Document history</h3><button className="secondary-button" disabled={vaultBusy || loading || !vaultRecords.length} onClick={clearVault}>Clear document history</button></div>
+              <p>Clearing document history keeps your saved people and pseudonyms.</p>
+              {vaultRecords.length === 0 ? <p>No processed documents saved yet.</p> : vaultRecords.map((record, index) => <div className="vault-record" key={record.id}>
+                <strong>Document {vaultRecords.length - index}</strong>
+                <span>{record.mode === "pseudonymize" ? "Pseudonymized" : "Anonymized"} · {record.count} replacements</span>
+                <button className="secondary-button" disabled={vaultBusy} onClick={() => exportText(record.text)}><Icon name="document" />Export TXT</button>
+                <button className="secondary-button" disabled={vaultBusy} onClick={() => exportText(record.text, "pdf")}>Export PDF</button>
+                {record.mode === "pseudonymize" && <button className="secondary-button" disabled={vaultBusy} onClick={() => restoreRecord(record.id)}>Restore original</button>}
+              </div>)}
+              {restoredText !== null && <div className="processed-output"><h3>Restored original</h3><textarea readOnly aria-label="Restored original text" value={restoredText} /><button className="secondary-button" onClick={() => setRestoredText(null)}>Hide original</button></div>}
+              {exportMessage && <p role="status">{exportMessage}</p>}
+            </>}
+          </>}
+
+          {workspaceView === "Settings" && <>
+            <h2>Detection categories</h2>
+            <p>Select the types of information to find and protect. Extra categories are optional.</p>
+            <div className="settings-category-grid">{PRIVACY_CATEGORIES.map((category) => <label className="privacy-category" key={category.value}><input type="checkbox" disabled={loading} checked={selectedEntities.includes(category.value)} onChange={() => toggleEntity(category.value)} /><span>{category.label}</span></label>)}</div>
+            <p className="selection-hint">Indirect identifiers include distinctive descriptions such as a rare role combined with a place or nationality. Suggestions need your review; uniqueness cannot be determined reliably from a document alone.</p>
+            <h3>Custom identifying phrases</h3>
+            <p>Enter one phrase per line to suggest it for review. Phrases are matched literally and saved in your encrypted Vault.</p>
+            {vaultStatus.unlocked ? <form className="settings-form" onSubmit={saveRules}>
+              <label>Identifying phrases<textarea ref={rulesRef} aria-label="Custom identifying phrases" defaultValue={savedRules.map((rule) => rule.phrase).join("\n")} placeholder="A distinctive job title or description" /></label>
+              <button className="secondary-button" disabled={vaultBusy || loading}>Save phrases</button>
+            </form> : <button className="secondary-button" onClick={() => setWorkspaceView("Vault")}>Open Vault to manage phrases</button>}
+            <h3>Vault sign-in</h3>
+            <form className="settings-form" onSubmit={changeProtection}>
+              <label><input type="radio" name="vault-protection" value="system" checked={vaultProtection === "system"} disabled={!vaultStatus.account_supported || vaultBusy || (vaultStatus.exists && !vaultStatus.unlocked)} onChange={() => setVaultProtection("system")} />Windows Hello / macOS sign-in</label>
+              <p>Verify with Windows Hello (PIN, fingerprint or face), or Touch ID / your Mac login password. Verification stays on your computer and is required each time you unlock the Vault.</p>
+              <label><input type="radio" name="vault-protection" value="account" checked={vaultProtection === "account"} disabled={!vaultStatus.account_supported || vaultBusy || (vaultStatus.exists && !vaultStatus.unlocked)} onChange={() => setVaultProtection("account")} />No extra Vault password</label>
+              <p>Opens automatically through your signed-in Windows or macOS account. Saved data remains encrypted on this computer.</p>
+              <label><input type="radio" name="vault-protection" value="passphrase" checked={vaultProtection === "passphrase"} disabled={vaultBusy || (vaultStatus.exists && !vaultStatus.unlocked)} onChange={() => setVaultProtection("passphrase")} />Separate Vault passphrase</label>
+              {vaultProtection === "passphrase" && vaultStatus.unlocked && <>
+                <label>New passphrase<input type="password" ref={protectionPasswordRef} autoComplete="new-password" required minLength={12} maxLength={1024} /></label>
+                <label>Confirm passphrase<input type="password" ref={protectionConfirmRef} autoComplete="new-password" required minLength={12} maxLength={1024} /></label>
+              </>}
+              {vaultStatus.exists && !vaultStatus.unlocked && <p>Unlock the Vault before changing its password setting.</p>}
+              {!vaultStatus.exists && <p>Your choice will be used when you create the Vault.</p>}
+              {vaultStatus.unlocked && <button className="primary" disabled={vaultBusy || loading}>Apply Vault setting</button>}
+            </form>
+            <h3>Clear data</h3>
+            <div className="data-actions">
+              <button className="secondary-button" disabled={loading} onClick={clearWorkspace}>Clear workspace</button>
+              <button className="secondary-button" disabled={!vaultStatus.unlocked || vaultBusy || loading} onClick={clearVault}>Clear document history</button>
+              <button className="danger-button" disabled={vaultBusy || loading} onClick={() => resetDialogRef.current?.showModal()}>Reset entire Vault</button>
+            </div>
+            {vaultError && <div className="error" role="alert">{vaultError}</div>}
+            {settingsMessage && <p role="status">{settingsMessage}</p>}
+          </>}
+
+        </section>}
+        <div hidden={workspaceView === "Vault" || workspaceView === "Settings"}>
+        <div className={`mode-indicator ${workspaceView === "Pseudonymize" ? "pseudonymize-mode" : ""}`} role="status" aria-live="polite">
+          <Icon name={workspaceView === "Pseudonymize" ? "database" : "home"} />
+          <div><strong>{workspaceView === "Pseudonymize" ? "Pseudonymization" : "Anonymization"}</strong>
+          <p>{workspaceView === "Pseudonymize" ? "Reversible replacement using pseudonyms and a secure identity mapping." : "Irreversible removal or replacement of identifying information."}</p>
+          <span>Accept or reject detections, then process the accepted information.</span></div>
+        </div>
+        {!vaultStatus.unlocked && <div className="vault-lock-note"><Icon name="vault" /><span>Unlock your Vault to save documents, reuse pseudonyms, and apply saved phrase rules.</span><button className="secondary-button" onClick={() => setWorkspaceView("Vault")}>Open Vault</button></div>}
+        <section ref={dropRegionRef} aria-label="Document and detection settings" className={`input-section ${dragging ? "drag-active" : ""}`} id="document">
+          <div className="drop-instruction"><Icon name="upload" /><span>{dragging ? "Drop your document here" : "Drop a document here or choose Upload document"}</span></div>
           <div className="input-methods" aria-label="Document input method">
             <button className={`input-method ${!importedDocument ? "selected" : ""}`} aria-pressed={!importedDocument} disabled={loading} onClick={() => {
               setImportedDocument(null);
               setImportError("");
               inputRef.current?.focus();
-            }}>Paste text</button>
-            <button className={`input-method ${importedDocument ? "selected" : ""}`} aria-pressed={!!importedDocument} disabled={loading} onClick={uploadDocument}>{importing ? "Opening / parsing locally…" : "Upload document"}</button>
+            }}><Icon name="document" />Paste text</button>
+            <button className={`input-method ${importedDocument ? "selected" : ""}`} aria-pressed={!!importedDocument} disabled={loading} onClick={() => void uploadDocument()}><Icon name="upload" />{importing ? "Opening / parsing locally…" : "Upload document"}</button>
             <span className="upload-help">TXT, DOCX, PDF, CSV, XLSX · up to 20 MB · local only</span>
           </div>
           {importedDocument && (
             <div className="file-summary">
               <div><strong>{importedDocument.file_name}</strong><span>{importedDocument.file_type.toUpperCase()}{importedDocument.pages !== null ? ` · ${importedDocument.pages} page(s)` : ""}</span></div>
-              <button className="secondary-button" disabled={loading} onClick={uploadDocument}>Replace file</button>
-              <button className="secondary-button" disabled={loading} onClick={removeDocument}>Remove file</button>
+              <button className="secondary-button" disabled={loading} onClick={() => void uploadDocument()}><Icon name="upload" />Replace file</button>
+              <button className="secondary-button" disabled={loading} onClick={removeDocument}><Icon name="trash" />Remove file</button>
             </div>
           )}
           {importing && <p className="selection-hint" role="status">Choose a document in the local file picker. Its text will be extracted on this device.</p>}
@@ -553,14 +929,15 @@ function App() {
           )}
           <div className="detect-toolbar">
             <span className="detect-label">Detect</span>
+            <details className="category-picker"><summary>Data categories ({selectedEntities.length})</summary>
             <div className="privacy-categories">
-              {PRIVACY_CATEGORIES.map((category, index) => (
+              {PRIVACY_CATEGORIES.map((category) => (
                 <label key={category.value} className="privacy-category">
                   <input type="checkbox" disabled={loading} checked={selectedEntities.includes(category.value)} onChange={() => toggleEntity(category.value)} />
-                  <span>{["Names", "Emails", "Phones", "Locations", "Organizations"][index]}</span>
+                  <span>{category.label}</span>
                 </label>
               ))}
-            </div>
+            </div></details>
             <button className="primary detect-button" onClick={detectPII} disabled={loading || !text.trim() || selectedEntities.length === 0}>
               {!importing && loading && !analyzed ? "Detecting…" : "Detect"}<Icon name="arrow" />
             </button>
@@ -569,18 +946,29 @@ function App() {
           {error && <div className="error" role="alert">Detection failed: {error}</div>}
         </section>
 
-        <section className="results-panel" aria-labelledby="results-heading">
+        <section className="results-panel" id="review" aria-labelledby="results-heading">
           <div className="panel-header">
             <div><h2 id="results-heading">Detected Information</h2><p>Review and refine the detected items before continuing.</p></div>
-            <span className="result-count">{detections.length} {detections.length === 1 ? "item" : "items"}</span>
+            <span className="result-count">{detections.filter((item) => item.status !== "pending").length} / {detections.length} reviewed</span>
           </div>
           {documentEdited && <p className="selection-hint" role="status">Your review has been preserved. Items affected by text changes need review again. Newly added information is not automatically detected; select it to add it manually.</p>}
           {reviewError && !editingDetection && <div className="error" role="alert">{reviewError}</div>}
+          <div className="review-toolbar">
+            <input type="search" aria-label="Search detected information" placeholder="Search detected information" value={reviewQuery} onChange={(event) => setReviewQuery(event.target.value)} />
+            <select aria-label="Filter review status" value={reviewFilter} onChange={(event) => setReviewFilter(event.target.value)}>
+              <option value="all">All detections</option>
+              <option value="pending">Pending review</option>
+              <option value="accepted">Accepted</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <button className="secondary-button" disabled={!reviewQuery && reviewFilter === "all"} onClick={() => { setReviewQuery(""); setReviewFilter("all"); }}>Clear filters</button>
+          </div>
+          {detections.length > 0 && !detections.some((item) => (reviewFilter === "all" || item.status === reviewFilter) && item.text.toLowerCase().includes(reviewQuery.toLowerCase())) && <p role="status" className="selection-hint">No detections match these filters.</p>}
           {detections.length === 0 ? (
             <div className="empty-results">{analyzed ? "No sensitive information detected. Select text above to add missed information." : "Your detected information will appear here. Add your text and select Detect to get started."}</div>
           ) : (
             <div className="detection-list">
-              {detections.map((item) => (
+              {detections.filter((item) => (reviewFilter === "all" || item.status === reviewFilter) && item.text.toLowerCase().includes(reviewQuery.toLowerCase())).map((item) => (
                 <div className={`detection-item ${item.status} ${editingId === item.id ? "editing" : ""}`} key={item.id}>
 
                   <div className="entity-text"><strong>{item.text}</strong><span className="review-status">{item.needsCorrection && item.status !== "rejected" ? "Text removed — edit or reject" : item.status === "pending" ? "Pending review" : item.status === "rejected" ? "Rejected" : "Accepted"}</span></div>
@@ -610,13 +998,34 @@ function App() {
           )}
           <div className="continue-actions">
             {analyzed && detections.some((item) => item.status === "pending") && <p>Accept or reject each item to continue.</p>}
-            <button className="primary continue-button" title="Validate accepted detections" onClick={validateAcceptedDetections} disabled={loading || editingId !== null || !detections.some((item) => item.status === "accepted")}>
-              {!importing && loading && analyzed ? "Validating…" : "Continue"}<Icon name="arrow" />
+            <button className="primary continue-button" title="Process accepted detections" onClick={validateAcceptedDetections} disabled={loading || !vaultStatus.unlocked || editingId !== null || !detections.some((item) => item.status === "accepted")}>
+              {!importing && loading && analyzed ? "Processing..." : workspaceView === "Pseudonymize" ? "Pseudonymize text" : "Anonymize text"}<Icon name="arrow" />
             </button>
           </div>
           {validation?.snapshot === reviewSnapshot && <div className={validation.success ? "validation-success" : "error"} role={validation.success ? "status" : "alert"}>{validation.message}</div>}
         </section>
+          {processed?.snapshot === reviewSnapshot && processed.mode === workspaceView && <section className="processed-output">
+            <h2>{processed.record.mode === "pseudonymize" ? "Pseudonymized text" : "Anonymized text"}</h2>
+            <p>Review the output before sharing. Rejected and undetected information remains in the text.</p>
+            <textarea readOnly aria-label="Processed text" value={processed.record.text} />
+            <button className="primary" onClick={() => exportText(processed.record.text)}><Icon name="document" />Export TXT</button>
+            <button className="secondary-button" onClick={() => exportText(processed.record.text, "pdf")}><Icon name="document" />Export PDF</button>
+            <p>PDF export creates a new text-layout PDF from this processed preview.</p>
+            {exportMessage && <p role="status">{exportMessage}</p>}
+          </section>}
+        </div>
       </main>
+      <dialog ref={resetDialogRef} className="reset-dialog" aria-labelledby="reset-title" onCancel={() => { setResetError(""); }}>
+        <form onSubmit={resetVault}>
+          <h2 id="reset-title">Reset entire Vault?</h2>
+          <p className="reset-warning">This permanently removes all saved people, identity mappings, custom rules, and document history. Pseudonymized documents may no longer be restorable through this Vault.</p>
+          <p>Exported files and backups are separate and will remain on your computer.</p>
+          {!vaultStatus.unlocked && vaultStatus.account_supported && <p>A locked Vault is replaced with an empty Vault protected by your current signed-in account.</p>}
+          <label>Type RESET VAULT to confirm<input ref={resetConfirmationRef} required pattern="RESET VAULT" autoComplete="off" /></label>
+          {resetError && <p className="error" role="alert">{resetError}</p>}
+          <div className="data-actions"><button type="button" className="secondary-button" disabled={vaultBusy} onClick={() => { resetDialogRef.current?.close(); if (resetConfirmationRef.current) resetConfirmationRef.current.value = ""; setResetError(""); }}>Cancel</button><button className="danger-button" disabled={vaultBusy}>{vaultBusy ? "Resetting..." : "Permanently reset Vault"}</button></div>
+        </form>
+      </dialog>
     </div>
   );
 }

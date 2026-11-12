@@ -10,7 +10,7 @@ pub struct ReviewedEntity {
     pub end: usize,
 }
 
-fn supported_entity(entity_type: &str) -> bool {
+pub(crate) fn supported_entity(entity_type: &str) -> bool {
     matches!(
         entity_type,
         "PERSON"
@@ -18,6 +18,15 @@ fn supported_entity(entity_type: &str) -> bool {
             | "PHONE_NUMBER"
             | "LOCATION"
             | "ORGANIZATION"
+            | "STREET_ADDRESS"
+            | "POSTAL_CODE"
+            | "DATE_TIME"
+            | "CREDIT_CARD"
+            | "IBAN_CODE"
+            | "IP_ADDRESS"
+            | "URL"
+            | "ID_NUMBER"
+            | "INDIRECT_IDENTIFIER"
     )
 }
 
@@ -35,9 +44,7 @@ pub fn validate_reviewed_detections(
     let mut ids = HashSet::new();
 
     for entity in &approved {
-        if entity.id.trim().is_empty()
-            || !ids.insert(entity.id.clone())
-        {
+        if entity.id.trim().is_empty() || !ids.insert(entity.id.clone()) {
             return Err("Invalid or duplicate detection ID".into());
         }
 
@@ -49,8 +56,7 @@ pub fn validate_reviewed_detections(
             return Err("Invalid detection position".into());
         }
 
-        let actual: String =
-            chars[entity.start..entity.end].iter().collect();
+        let actual: String = chars[entity.start..entity.end].iter().collect();
 
         if actual != entity.text {
             return Err("Detection no longer matches the text".into());
@@ -94,20 +100,15 @@ mod tests {
 
     #[test]
     fn rejects_wrong_text() {
-        let result = validate_reviewed_detections(
-            "John Smith".into(),
-            vec![entity("Jane Smith", 0, 10)],
-        );
+        let result =
+            validate_reviewed_detections("John Smith".into(), vec![entity("Jane Smith", 0, 10)]);
 
         assert!(result.is_err());
     }
 
     #[test]
     fn supports_unicode_positions() {
-        let result = validate_reviewed_detections(
-            "😀مرحبا".into(),
-            vec![entity("مرحبا", 1, 6)],
-        );
+        let result = validate_reviewed_detections("😀مرحبا".into(), vec![entity("مرحبا", 1, 6)]);
 
         assert!(result.is_ok());
     }
@@ -144,10 +145,7 @@ mod additional_tests {
     fn rejects_duplicate_ids() {
         let result = validate_reviewed_detections(
             "John Smith".into(),
-            vec![
-                entity("same", "John", 0, 4),
-                entity("same", "Smith", 5, 10),
-            ],
+            vec![entity("same", "John", 0, 4), entity("same", "Smith", 5, 10)],
         );
         assert!(result.is_err());
     }
@@ -157,36 +155,69 @@ mod additional_tests {
         let mut item = entity("1", "John", 0, 4);
         item.entity_type = "UNKNOWN".into();
 
-        assert!(validate_reviewed_detections(
-            "John".into(),
-            vec![item],
-        ).is_err());
+        assert!(validate_reviewed_detections("John".into(), vec![item],).is_err());
     }
 
     #[test]
     fn rejects_out_of_bounds_positions() {
-        assert!(validate_reviewed_detections(
-            "John".into(),
-            vec![entity("1", "John", 0, 100)],
-        ).is_err());
+        assert!(
+            validate_reviewed_detections("John".into(), vec![entity("1", "John", 0, 100)],)
+                .is_err()
+        );
     }
 
     #[test]
     fn accepts_adjacent_detections() {
-        assert!(validate_reviewed_detections(
-            "John Smith".into(),
-            vec![
-                entity("1", "John", 0, 4),
-                entity("2", " Smith", 4, 10),
-            ],
-        ).is_ok());
+        assert!(
+            validate_reviewed_detections(
+                "John Smith".into(),
+                vec![entity("1", "John", 0, 4), entity("2", " Smith", 4, 10),],
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn rejects_empty_detection_id() {
-        assert!(validate_reviewed_detections(
-            "John".into(),
-            vec![entity("", "John", 0, 4)],
-        ).is_err());
+        assert!(
+            validate_reviewed_detections("John".into(), vec![entity("", "John", 0, 4)],).is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_submission_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn returns_reviewed_spans_in_document_order_with_their_ids_and_categories() {
+        // The reviewer kept the second mention and corrected the category of "Acme".
+        // A leading emoji occupies one Python/Rust character and two JS code units.
+        let document = "\u{1f600} Mira met Mira at Acme";
+        let submitted = json!([
+            {"id":"manual-1","entity_type":"ORGANIZATION","text":"Acme","start":19,"end":23},
+            {"id":"auto-2","entity_type":"PERSON","text":"Mira","start":11,"end":15}
+        ]);
+        let reviewed = serde_json::from_value(submitted.clone()).unwrap();
+        let validated = validate_reviewed_detections(document.into(), reviewed).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(validated).unwrap(),
+            json!([submitted[1], submitted[0]])
+        );
+    }
+
+    #[test]
+    fn rejects_the_entire_submission_when_one_reviewed_span_is_stale() {
+        let submitted = json!([
+            {"id":"auto-1","entity_type":"PERSON","text":"Mira","start":0,"end":4},
+            {"id":"manual-1","entity_type":"ORGANIZATION","text":"Acme","start":8,"end":12}
+        ]);
+        let reviewed = serde_json::from_value(submitted).unwrap();
+        // The second span is still in bounds after the edit, but refers to different text.
+        let result = validate_reviewed_detections("Mira at Nova".into(), reviewed);
+
+        assert_eq!(result.unwrap_err(), "Detection no longer matches the text");
     }
 }
