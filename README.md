@@ -62,6 +62,13 @@ Early development — Phase 1
 
 ## Local Vault sign-in
 
+Anonymization works without creating or unlocking a Vault. It replaces reviewed
+information with `[REDACTED]`, keeps the result only in the current workspace,
+and supports TXT/PDF export without saving document history to the Vault.
+Pseudonymization requires an unlocked Vault to save reusable identity mappings,
+processed document history, and originals for restoration. Existing history is
+kept until explicitly cleared.
+
 In Settings > Vault sign-in, choose one of three modes:
 
 - **Windows Hello / macOS sign-in:** native identity verification each time the Vault is unlocked. Windows uses Hello PIN, fingerprint or face when configured. macOS uses Touch ID or the Mac login password. Cancelling or failing verification keeps the Vault locked.

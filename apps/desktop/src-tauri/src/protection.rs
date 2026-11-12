@@ -121,7 +121,7 @@ impl SessionVault {
         if approved.is_empty() {
             return Err("Accept at least one detection before processing".into());
         }
-        if self.records.len() >= 100 {
+        if mode == "pseudonymize" && self.records.len() >= 100 {
             return Err("Document history is full. Clear history in the Vault; saved identities will be kept.".into());
         }
         let chars: Vec<char> = text.chars().collect();
@@ -144,6 +144,9 @@ impl SessionVault {
             text: output,
             count: approved.len(),
         };
+        if mode == "anonymize" {
+            return Ok(record);
+        }
         self.records.push(StoredRecord {
             public: record.clone(),
             original: (mode == "pseudonymize").then_some(text),
@@ -301,6 +304,10 @@ pub fn process_reviewed_text(
     mode: String,
     vault: State<'_, VaultState>,
 ) -> Result<ProcessedRecord, String> {
+    // Anonymization is transient: never open, read, or update the persistent Vault.
+    if mode == "anonymize" {
+        return SessionVault::default().process(text, detections, &mode);
+    }
     vault
         .0
         .lock()
@@ -525,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn anonymization_replaces_only_reviewed_spans_and_cannot_restore() {
+    fn anonymization_replaces_only_reviewed_spans_without_saving_history() {
         let mut vault = SessionVault::default();
         let result = vault
             .process(
@@ -537,7 +544,24 @@ mod tests {
         assert_eq!(result.text, "[REDACTED] met Jane");
         assert!(vault.restore(&result.id).is_err());
         assert!(vault.pseudonyms.is_empty());
-        assert!(vault.records[0].original.is_none());
+        assert!(vault.records.is_empty());
+    }
+
+    #[test]
+    fn anonymization_leaves_existing_full_vault_unchanged() {
+        let mut vault = SessionVault::default();
+        let saved = vault
+            .process("John".into(), vec![entity("1", "John", 0)], "pseudonymize")
+            .unwrap();
+        vault.records = vec![vault.records[0].clone(); 100];
+        let before = serde_json::to_value(&vault).unwrap();
+        let output = vault
+            .process("John".into(), vec![entity("1", "John", 0)], "anonymize")
+            .unwrap();
+        assert_eq!(output.text, "[REDACTED]");
+        assert_eq!(serde_json::to_value(&vault).unwrap(), before);
+        assert!(vault.restore(&output.id).is_err());
+        assert_eq!(vault.restore(&saved.id).unwrap(), "John");
     }
 
     #[test]

@@ -120,5 +120,5 @@ fn mac_unprotect(reference: &[u8]) -> Result<Vec<u8>, String> {
     keyring::Entry::new("com.veil.local-vault", name)
         .map_err(|_| "Unable to access macOS Keychain")?
         .get_secret()
-        .map_err(|_| "macOS Keychain could not unlock the Vault")
+        .map_err(|_| "macOS Keychain could not unlock the Vault".to_string())
 }

@@ -110,6 +110,7 @@ function App() {
   const [resetError, setResetError] = useState("");
   const importInFlightRef = useRef(false);
   const [dragging, setDragging] = useState(false);
+  const vaultPromptRef = useRef<HTMLDialogElement>(null);
   const resetDialogRef = useRef<HTMLDialogElement>(null);
   const resetConfirmationRef = useRef<HTMLInputElement>(null);
   const protectionPasswordRef = useRef<HTMLInputElement>(null);
@@ -700,7 +701,11 @@ function App() {
 
 
   async function validateAcceptedDetections(includePending = false) {
-    if (loading || !analyzed || !vaultStatus.unlocked || editingId !== null) return;
+    if (loading || !analyzed || editingId !== null) return;
+    if (workspaceView === "Pseudonymize" && !vaultStatus.unlocked) {
+      vaultPromptRef.current?.showModal();
+      return;
+    }
     let accepted: ValidatedDetection[];
     let nextDetections = detections;
     try {
@@ -862,7 +867,7 @@ function App() {
           <p>{workspaceView === "Pseudonymize" ? "Reversible replacement using pseudonyms and a secure identity mapping." : "Irreversible removal or replacement of identifying information."}</p>
           <span>Accept or reject detections, then process the accepted information.</span></div>
         </div>
-        {!vaultStatus.unlocked && <div className="vault-lock-note"><Icon name="vault" /><span>Unlock your Vault to save documents, reuse pseudonyms, and apply saved phrase rules.</span><button className="secondary-button" onClick={() => setWorkspaceView("Vault")}>Open Vault</button></div>}
+        {workspaceView === "Pseudonymize" && !vaultStatus.unlocked && <div className="vault-lock-note"><Icon name="vault" /><span>Unlock your Vault to pseudonymize documents and reuse saved identities.</span><button className="secondary-button" onClick={() => setWorkspaceView("Vault")}>Open Vault</button></div>}
         <section ref={dropRegionRef} aria-label="Document and detection settings" className={`input-section ${dragging ? "drag-active" : ""}`} id="document">
           <div className="drop-instruction"><Icon name="upload" /><span>{dragging ? "Drop your document here" : "Drop a document here or choose Upload document"}</span></div>
           <div className="input-methods" aria-label="Document input method">
@@ -1019,10 +1024,10 @@ function App() {
           <div className="continue-actions">
             {analyzed && detections.some(item => item.status === "pending") && <p>You can process all pending detections now, or process only the items you accepted. Rejected items stay unchanged. Processing uses the whole document; filters only scope accept/reject.</p>}
             <div className="processing-options">
-              <button className="secondary-button" title="Process only accepted detections; pending and rejected items remain unchanged" onClick={() => void validateAcceptedDetections(false)} disabled={loading || !vaultStatus.unlocked || editingId !== null || !detections.some(item => item.status === "accepted")}>
+              <button className="secondary-button" title="Process only accepted detections; pending and rejected items remain unchanged" onClick={() => void validateAcceptedDetections(false)} disabled={loading || editingId !== null || !detections.some(item => item.status === "accepted")}>
                 {workspaceView === "Pseudonymize" ? "Pseudonymize accepted" : "Anonymize accepted"}<Icon name="arrow" />
               </button>
-              <button className="primary continue-button" title="Process accepted and pending detections; explicitly rejected items remain unchanged" onClick={() => void validateAcceptedDetections(true)} disabled={loading || !analyzed || !vaultStatus.unlocked || editingId !== null || !detections.some(item => item.status !== "rejected")}>
+              <button className="primary continue-button" title="Process accepted and pending detections; explicitly rejected items remain unchanged" onClick={() => void validateAcceptedDetections(true)} disabled={loading || !analyzed || editingId !== null || !detections.some(item => item.status !== "rejected")}>
                 {!importing && loading && analyzed ? "Processing..." : workspaceView === "Pseudonymize" ? "Pseudonymize all detections" : "Anonymize all detections"}<Icon name="arrow" />
               </button>
             </div>
@@ -1032,6 +1037,7 @@ function App() {
           {processed?.snapshot === reviewSnapshot && processed.mode === workspaceView && <section className="processed-output">
             <h2>{processed.record.mode === "pseudonymize" ? "Pseudonymized text" : "Anonymized text"}</h2>
             <p>Review the output before sharing. Rejected and undetected information remains in the text.</p>
+            {processed.record.mode === "anonymize" && <p>Anonymized text stays in this workspace and is not saved to the Vault. Export it before closing the app.</p>}
             <textarea readOnly aria-label="Processed text" value={processed.record.text} />
             <button className="primary" onClick={() => exportText(processed.record.text)}><Icon name="document" />Export TXT</button>
             <button className="secondary-button" onClick={() => exportText(processed.record.text, "pdf")}><Icon name="document" />Export PDF</button>
@@ -1040,6 +1046,20 @@ function App() {
           </section>}
         </div>
       </main>
+      <dialog ref={vaultPromptRef} className="vault-prompt" aria-labelledby="vault-prompt-title" aria-describedby="vault-prompt-description">
+        <div className="vault-prompt-icon"><Icon name="vault" /></div>
+        <h2 id="vault-prompt-title">{vaultStatus.exists ? "Unlock your Vault" : "Create your Vault"}</h2>
+        <p id="vault-prompt-description">Pseudonymization needs your Vault to securely save identities and restore the original text later. Your current review will be kept.</p>
+        <div className="vault-prompt-actions">
+          <button className="secondary-button" autoFocus onClick={() => vaultPromptRef.current?.close()}>Not now</button>
+          <button className="primary" onClick={() => {
+            vaultPromptRef.current?.close();
+            setWorkspaceView("Vault");
+            setVaultError("");
+            void refreshVault();
+          }}>Open Vault<Icon name="arrow" /></button>
+        </div>
+      </dialog>
       <dialog ref={resetDialogRef} className="reset-dialog" aria-labelledby="reset-title" onCancel={() => { setResetError(""); }}>
         <form onSubmit={resetVault}>
           <h2 id="reset-title">Reset entire Vault?</h2>
