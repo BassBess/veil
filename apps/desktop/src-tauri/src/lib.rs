@@ -7,7 +7,7 @@ mod os_auth;
 mod protection;
 mod review;
 mod vault_storage;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -16,8 +16,8 @@ fn validate_detection_request(text: &str, entities: &[String]) -> Result<(), Str
         return Err("Please enter text before detection".into());
     }
 
-    if text.len() > 100_000 {
-        return Err("Text exceeds the 100,000-byte limit".into());
+    if text.len() > 500_000 {
+        return Err("Text exceeds the 500,000-byte limit".into());
     }
 
     if entities.is_empty() {
@@ -85,15 +85,48 @@ fn run_detection(
             .map_err(|_| "Unable to send detection request")?;
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|_| "Python engine execution failed")?;
-
-    if !output.status.success() {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Unable to read the detection response")?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take(16_000_001)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(if result.is_err() {
+                    "The local detection engine stopped unexpectedly"
+                } else {
+                    "Detection exceeded three minutes. Split the document into smaller files."
+                });
+            }
+        }
+    };
+    let output = reader
+        .join()
+        .map_err(|_| "Unable to read detection results")?
+        .map_err(|_| "Unable to read detection results")?;
+    if !status?.success() {
         return Err("PII detection failed".into());
     }
-
-    serde_json::from_slice(&output.stdout).map_err(|_| "Invalid response from Python engine".into())
+    if output.len() > 16_000_000 {
+        return Err(
+            "The document contains too many detections. Split it into smaller files.".into(),
+        );
+    }
+    serde_json::from_slice(&output).map_err(|_| "Invalid response from Python engine".into())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -165,7 +198,7 @@ mod detection_request_tests {
 
     #[test]
     fn rejects_oversized_input() {
-        let text = "a".repeat(100_001);
+        let text = "a".repeat(500_001);
         assert!(validate_detection_request(&text, &categories()).is_err());
     }
 }

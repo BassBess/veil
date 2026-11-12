@@ -72,10 +72,9 @@ solution; this feature does not bundle a Python runtime.
 - XLSX includes sheet names and rows in workbook order. Formulas use cached
   values; formulas are never executed or recalculated. Numeric display formatting,
   charts and images are not preserved. Password-encrypted workbooks are unsupported.
-- Files: maximum 20 MiB. Extracted text: maximum 100,000 UTF-8 bytes (the existing
-  detection backend limit). Oversized extraction fails without truncating text.
+- Files: configurable in Settings (20, 50 or 100 MiB; default 100 MiB). Extracted text: maximum 500,000 UTF-8 bytes. Oversized extraction fails without truncating text.
 - DOCX/XLSX archives: maximum 100 MiB declared uncompressed size. PDFs: maximum
-  500 pages. Python parsing is terminated by Rust after 30 seconds.
+  500 pages. Python parsing is terminated by Rust after 90 seconds.
 - Review state remains in memory, matching the existing app; import adds no
   document storage, cloud service or external API.
 
@@ -119,3 +118,11 @@ Manual desktop smoke check (native dialogs require a running desktop window):
 - Remove the file and test pasted-text detection again.
 - Import a scanned PDF; confirm the warning and disabled Detect for empty text.
 - Check native picker behavior on both macOS and Windows.
+
+## Bulk review and large text
+
+- Filter results by category, search text, or review status, then use Accept all / Reject all. These actions include every matching result across the paginated list.
+- Individual decisions link pending matches by text and category by default. Explicit per-occurrence rejections are preserved. Accepting an item also includes non-overlapping exact occurrences missed by detection; turn off linking for a single-occurrence decision.
+- Process accepted items alone, or use Anonymize/Pseudonymize all detections to include pending items. Explicit rejections are always excluded. Stale or overlapping selections must still be corrected or rejected.
+- Text extraction rejects oversized content without truncation. Detection processes long text in 20,000-character windows with 1,024-character overlap and globally resolves overlapping results.
+- File size and extracted-text limits are independent. A large image-heavy PDF can contain little extractable text; OCR and preservation of the original PDF layout remain separate features.

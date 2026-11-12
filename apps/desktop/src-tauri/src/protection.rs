@@ -358,8 +358,8 @@ pub(crate) fn find_matches(
     identity: &SavedIdentity,
     text: &str,
 ) -> Result<Vec<ReviewedEntity>, String> {
-    if text.len() > 100_000 {
-        return Err("Text exceeds the 100,000-byte limit".into());
+    if text.len() > 500_000 {
+        return Err("Text exceeds the 500,000-byte limit".into());
     }
     let pattern = regex::RegexBuilder::new(&regex::escape(&identity.original))
         .case_insensitive(matches!(
@@ -755,7 +755,7 @@ pub fn list_detection_rules(vault: State<'_, VaultState>) -> Result<Vec<Detectio
 }
 
 #[tauri::command]
-pub fn detect_with_rules(
+pub async fn detect_with_rules(
     text: String,
     entities: Vec<String>,
     vault: State<'_, VaultState>,
@@ -767,7 +767,9 @@ pub fn detect_with_rules(
         .as_ref()
         .map(|opened| opened.data.rules.clone())
         .unwrap_or_default();
-    crate::run_detection(text, entities, rules)
+    tauri::async_runtime::spawn_blocking(move || crate::run_detection(text, entities, rules))
+        .await
+        .map_err(|_| "The local detection task stopped unexpectedly".to_string())?
 }
 
 #[cfg(test)]
@@ -818,5 +820,37 @@ mod new_workflow_tests {
         let pdf = super::rendered_pdf("PERSON_001\nEMAIL_001").unwrap();
         assert!(pdf.starts_with(b"%PDF"));
         assert!(pdf.len() > 500);
+    }
+}
+
+#[cfg(test)]
+mod large_text_processing_tests {
+    #[test]
+    fn larger_text_processes_and_restores_without_truncation() {
+        let source = format!("{}John Smith", "ordinary text ".repeat(10_000));
+        assert!(source.len() > 100_000);
+        let end = source.chars().count();
+        let mut vault = super::SessionVault::default();
+        let result = vault
+            .process(
+                source.clone(),
+                vec![crate::review::ReviewedEntity {
+                    id: "large-tail".into(),
+                    entity_type: "PERSON".into(),
+                    text: "John Smith".into(),
+                    start: end - 10,
+                    end,
+                }],
+                "pseudonymize",
+            )
+            .unwrap();
+        assert!(result.text.ends_with("PERSON_001"));
+        assert_eq!(vault.restore(&result.id).unwrap(), source);
+        assert!(
+            vault
+                .process("x".repeat(500_001), vec![], "anonymize")
+                .is_err()
+        );
+        assert_eq!(vault.records.len(), 1);
     }
 }

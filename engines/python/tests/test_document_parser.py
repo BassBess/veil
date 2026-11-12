@@ -146,7 +146,7 @@ class TestDocumentParser(unittest.TestCase):
 
     def test_empty_and_oversized(self):
         self.assert_error(self.write('empty.txt', b''), 'empty_file')
-        self.assert_error(self.write('long.txt', b'a' * 100_001), 'text_too_large')
+        self.assert_error(self.write('long.txt', b'a' * 500_001), 'text_too_large')
         with patch('veil_engine.document_parser.MAX_FILE_BYTES', 2):
             self.assert_error(self.write('big.txt', b'abc'), 'file_too_large')
 

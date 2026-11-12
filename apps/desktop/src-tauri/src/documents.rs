@@ -8,7 +8,7 @@ use std::{
 };
 use tauri_plugin_dialog::DialogExt;
 
-const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct DocumentError {
@@ -33,7 +33,23 @@ pub struct ParsedDocument {
     warnings: Vec<String>,
 }
 
+fn requested_file_limit(max_file_mb: Option<u64>) -> Result<u64, DocumentError> {
+    let mb = max_file_mb.unwrap_or(100);
+    if !(1..=100).contains(&mb) {
+        return Err(DocumentError::new(
+            "invalid_limit",
+            "Choose an import limit between 1 and 100 MB.",
+        ));
+    }
+    Ok((mb * 1024 * 1024).min(MAX_FILE_BYTES))
+}
+
+#[cfg(test)]
 fn validate_file(path: &Path) -> Result<(), DocumentError> {
+    validate_file_with_limit(path, MAX_FILE_BYTES)
+}
+
+fn validate_file_with_limit(path: &Path, max_file_bytes: u64) -> Result<(), DocumentError> {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -64,10 +80,13 @@ fn validate_file(path: &Path) -> Result<(), DocumentError> {
             "Select a regular document file.",
         ));
     }
-    if metadata.len() > MAX_FILE_BYTES {
+    if metadata.len() > max_file_bytes {
         return Err(DocumentError::new(
             "file_too_large",
-            "The file exceeds the 20 MB limit.",
+            &format!(
+                "The file exceeds your {} MB import limit. Change it in Settings (maximum 100 MB).",
+                max_file_bytes / (1024 * 1024)
+            ),
         ));
     }
     if metadata.len() == 0 {
@@ -79,8 +98,16 @@ fn validate_file(path: &Path) -> Result<(), DocumentError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn parse_path(path: &Path) -> Result<ParsedDocument, DocumentError> {
-    validate_file(path)?;
+    parse_path_with_limit(path, MAX_FILE_BYTES)
+}
+
+fn parse_path_with_limit(
+    path: &Path,
+    max_file_bytes: u64,
+) -> Result<ParsedDocument, DocumentError> {
+    validate_file_with_limit(path, max_file_bytes)?;
     let file_path = path.to_str().ok_or_else(|| {
         DocumentError::new(
             "invalid_path",
@@ -99,7 +126,7 @@ fn parse_path(path: &Path) -> Result<ParsedDocument, DocumentError> {
                 "Unable to start the local Python parser. Check the engine environment.",
             )
         })?;
-    let request = serde_json::json!({"action": "parse_document", "file_path": file_path});
+    let request = serde_json::json!({"action": "parse_document", "file_path": file_path, "max_file_bytes": max_file_bytes});
     let write_result = child
         .stdin
         .take()
@@ -126,11 +153,11 @@ fn parse_path(path: &Path) -> Result<ParsedDocument, DocumentError> {
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout
-            .take(1_000_001)
+            .take(4_000_001)
             .read_to_end(&mut bytes)
             .map(|_| bytes)
     });
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(90);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -180,10 +207,10 @@ fn parse_path(path: &Path) -> Result<ParsedDocument, DocumentError> {
                 "The local parser returned incomplete document data.",
             )
         })?;
-    if document.text.len() > 100_000 {
+    if document.text.len() > 500_000 {
         return Err(DocumentError::new(
             "text_too_large",
-            "Extracted text exceeds the 100,000-byte limit.",
+            "Extracted text exceeds the 500,000-byte limit.",
         ));
     }
     Ok(document)
@@ -193,7 +220,9 @@ fn parse_path(path: &Path) -> Result<ParsedDocument, DocumentError> {
 #[tauri::command]
 pub async fn parse_document(
     app: tauri::AppHandle,
+    max_file_mb: Option<u64>,
 ) -> Result<Option<ParsedDocument>, DocumentError> {
+    let max_file_bytes = requested_file_limit(max_file_mb)?;
     tauri::async_runtime::spawn_blocking(move || {
         let selected = app
             .dialog()
@@ -206,7 +235,7 @@ pub async fn parse_document(
         let path = selected
             .into_path()
             .map_err(|_| DocumentError::new("invalid_path", "Select a local document file."))?;
-        parse_path(&path).map(Some)
+        parse_path_with_limit(&path, max_file_bytes).map(Some)
     })
     .await
     .map_err(|_| {
@@ -335,11 +364,13 @@ impl DroppedDocuments {
 #[tauri::command]
 pub async fn parse_dropped_document(
     path: String,
+    max_file_mb: Option<u64>,
     dropped: tauri::State<'_, DroppedDocuments>,
 ) -> Result<ParsedDocument, DocumentError> {
     let path = std::path::PathBuf::from(path);
     dropped.consume(&path)?;
-    tauri::async_runtime::spawn_blocking(move || parse_path(&path))
+    let max_file_bytes = requested_file_limit(max_file_mb)?;
+    tauri::async_runtime::spawn_blocking(move || parse_path_with_limit(&path, max_file_bytes))
         .await
         .map_err(|_| {
             DocumentError::new(
@@ -360,5 +391,34 @@ mod dropped_tests {
         dropped.authorize(vec![path.clone()]);
         assert!(dropped.consume(&path).is_ok());
         assert!(dropped.consume(&path).is_err());
+    }
+}
+
+#[cfg(test)]
+mod import_limit_tests {
+    use super::*;
+    #[test]
+    fn import_limit_defaults_and_bounds() {
+        assert_eq!(requested_file_limit(None).unwrap(), MAX_FILE_BYTES);
+        assert_eq!(requested_file_limit(Some(20)).unwrap(), 20 * 1024 * 1024);
+        assert!(requested_file_limit(Some(0)).is_err());
+        assert!(requested_file_limit(Some(101)).is_err());
+        assert!(requested_file_limit(Some(u64::MAX)).is_err());
+    }
+    #[test]
+    fn larger_document_requires_selected_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large.pdf");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(21 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(
+            validate_file_with_limit(&path, requested_file_limit(Some(20)).unwrap())
+                .unwrap_err()
+                .code,
+            "file_too_large"
+        );
+        assert!(validate_file_with_limit(&path, requested_file_limit(Some(50)).unwrap()).is_ok());
     }
 }

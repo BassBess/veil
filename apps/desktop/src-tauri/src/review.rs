@@ -35,7 +35,7 @@ pub fn validate_reviewed_detections(
     text: String,
     detections: Vec<ReviewedEntity>,
 ) -> Result<Vec<ReviewedEntity>, String> {
-    if text.len() > 100_000 {
+    if text.len() > 500_000 {
         return Err("Text exceeds the size limit".into());
     }
 

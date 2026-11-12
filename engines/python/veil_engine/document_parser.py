@@ -2,8 +2,8 @@
 from pathlib import Path
 from zipfile import ZipFile, BadZipFile
 
-MAX_FILE_BYTES = 20 * 1024 * 1024
-MAX_TEXT_BYTES = 100_000
+MAX_FILE_BYTES = 100 * 1024 * 1024
+MAX_TEXT_BYTES = 500_000
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 SUPPORTED_TYPES = {"txt", "docx", "pdf", "csv", "xlsx"}
 PDF_WARNING = "This PDF may be scanned or image-based. OCR is not yet supported."
@@ -23,7 +23,7 @@ def _join(parts):
             continue
         size += len(part.encode("utf-8")) + (1 if result else 0)
         if size > MAX_TEXT_BYTES:
-            raise DocumentError("text_too_large", "Extracted text exceeds the 100,000-byte limit. Use a smaller document.")
+            raise DocumentError("text_too_large", "Extracted text exceeds the 500,000-byte limit. Use a smaller document.")
         result.append(part)
     return "\n".join(result)
 
@@ -129,7 +129,10 @@ def _check_archive(path):
             raise DocumentError("encrypted", "Encrypted documents are not supported. Choose an unlocked copy.")
 
 
-def parse_document(file_path):
+def parse_document(file_path, max_file_bytes=None):
+    limit = MAX_FILE_BYTES if max_file_bytes is None else max_file_bytes
+    if type(limit) is not int or not 1 <= limit <= MAX_FILE_BYTES:
+        raise DocumentError("invalid_limit", "Choose an import limit no larger than 100 MB.")
     path = Path(file_path)
     kind = path.suffix.lower().lstrip(".")
     if kind not in SUPPORTED_TYPES:
@@ -140,8 +143,8 @@ def parse_document(file_path):
         if not path.is_file():
             raise DocumentError("invalid_file", "Select a regular document file.")
         size = path.stat().st_size
-        if size > MAX_FILE_BYTES:
-            raise DocumentError("file_too_large", "The file exceeds the 20 MB limit. Choose a smaller document.")
+        if size > limit:
+            raise DocumentError("file_too_large", f"The file exceeds your {limit // (1024 * 1024)} MB import limit. Change it in Settings (maximum 100 MB).")
         if size == 0:
             raise DocumentError("empty_file", "The selected file is empty.")
         if kind in {"docx", "xlsx"}:

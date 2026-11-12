@@ -1,3 +1,4 @@
+from bisect import bisect_left
 import spacy
 from veil_engine.context_rules import suggestions
 from tldextract import TLDExtract
@@ -57,6 +58,26 @@ class VeilDetector:
         if not isinstance(text, str):
             raise TypeError("Text must be a string")
 
+        if len(text.encode("utf-8")) > 500_000:
+            raise ValueError("Text exceeds the 500,000-byte limit")
+
+        # Bounded NLP windows with overlapping context preserve global Unicode
+        # offsets. Resolve duplicate / conflicting spans only after all windows.
+        if len(text) > 20_000:
+            unique = {}
+            start = 0
+            while start < len(text):
+                end = min(start + 20_000, len(text))
+                for item in self.detect(text[start:end], entities, rules):
+                    item = {**item, "start": item["start"] + start, "end": item["end"] + start}
+                    key = (item["entity_type"], item["start"], item["end"])
+                    if key not in unique or item["confidence"] > unique[key]["confidence"]:
+                        unique[key] = item
+                if end == len(text):
+                    break
+                start = end - 1_024
+            return list(unique.values())
+
         # If specific categories were requested,
         # keep only categories currently supported by Veil.
         if entities is not None:
@@ -113,18 +134,12 @@ class VeilDetector:
         )
 
         selected = []
-
+        starts = []
         for candidate in ranked:
-            overlaps = any(
-                candidate["start"] < existing["end"]
-                and candidate["end"] > existing["start"]
-                for existing in selected
-            )
-
-            if not overlaps:
-                selected.append(candidate)
-
-        return sorted(
-            selected,
-            key=lambda item: item["start"],
-        )
+            position = bisect_left(starts, candidate["start"])
+            before = position > 0 and selected[position - 1]["end"] > candidate["start"]
+            after = position < len(selected) and selected[position]["start"] < candidate["end"]
+            if not before and not after:
+                starts.insert(position, candidate["start"])
+                selected.insert(position, candidate)
+        return selected

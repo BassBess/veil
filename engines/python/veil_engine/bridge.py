@@ -16,7 +16,7 @@ def main():
         if request.get("action") == "parse_document":
             from veil_engine.document_parser import DocumentError, parse_document
             try:
-                result = parse_document(request["file_path"])
+                result = parse_document(request["file_path"], request.get("max_file_bytes"))
                 json.dump({"document": result}, sys.stdout)
             except DocumentError as error:
                 json.dump({"error": {"code": error.code, "message": str(error)}}, sys.stdout)
