@@ -59,6 +59,13 @@ Windows also needs Microsoft Edge WebView2 Runtime, which is normally already in
 
 Early development — Phase 1
 
+## Multilingual detection
+
+Select English, French, Spanish, or Arabic in **Document language** before
+detecting. Choose the data categories to check and review suggestions before
+processing. Automatically excluded suggestions remain inspectable. See [multilingual setup and limitations](docs/multilingual-detection.md)
+for model installation on each computer and current language coverage.
+
 
 ## Local Vault sign-in
 

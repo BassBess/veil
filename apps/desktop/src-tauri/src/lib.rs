@@ -60,12 +60,29 @@ fn run_detection(
     entities: Vec<String>,
     rules: Vec<protection::DetectionRule>,
 ) -> Result<serde_json::Value, String> {
+    run_detection_with_options(
+        text,
+        entities,
+        rules,
+        protection::DetectionOptions::default(),
+    )
+}
+
+fn run_detection_with_options(
+    text: String,
+    entities: Vec<String>,
+    rules: Vec<protection::DetectionRule>,
+    options: protection::DetectionOptions,
+) -> Result<serde_json::Value, String> {
     validate_detection_request(&text, &entities)?;
+    options.validate()?;
 
     let request = serde_json::json!({
         "text": text,
         "entities": entities,
         "rules": rules,
+        "language": options.language,
+        "options": options,
     });
 
     let mut child = engine_command()
@@ -126,7 +143,16 @@ fn run_detection(
             "The document contains too many detections. Split it into smaller files.".into(),
         );
     }
-    serde_json::from_slice(&output).map_err(|_| "Invalid response from Python engine".into())
+    let response: serde_json::Value =
+        serde_json::from_slice(&output).map_err(|_| "Invalid response from Python engine")?;
+    if let Some(message) = response
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(|message| message.as_str())
+    {
+        return Err(message.into());
+    }
+    Ok(response)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -206,7 +232,79 @@ mod detection_request_tests {
 #[cfg(test)]
 mod detection_review_flow_tests {
     use super::*;
-    use crate::review::{ReviewedEntity, validate_reviewed_detections};
+    use crate::review::{validate_reviewed_detections, ReviewedEntity};
+
+    #[test]
+    #[ignore = "requires all four local language models"]
+    fn multilingual_detection_rules_and_both_processing_modes() {
+        for (language, source, name) in [
+            (
+                "en",
+                "John Smith lives in London. John Smith called.",
+                "John Smith",
+            ),
+            (
+                "fr",
+                "Jean Dupont habite à Paris. Jean Dupont téléphone.",
+                "Jean Dupont",
+            ),
+            (
+                "es",
+                "María García vive en Madrid. María García llama.",
+                "María García",
+            ),
+            (
+                "ar",
+                "محمد أحمد يعيش في بيروت. محمد أحمد يتصل.",
+                "محمد أحمد",
+            ),
+        ] {
+            let options = protection::DetectionOptions {
+                language: language.into(),
+                ..Default::default()
+            };
+            let response = run_detection_with_options(
+                source.into(),
+                vec!["PERSON".into()],
+                vec![],
+                options.clone(),
+            )
+            .unwrap();
+            let spans: Vec<ReviewedEntity> = response["detections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let mut item = item.clone();
+                    item["id"] = format!("hit-{index}").into();
+                    serde_json::from_value(item).unwrap()
+                })
+                .collect();
+            assert!(spans.iter().any(|span| span.text == name), "{language}");
+            let mut data = protection::SessionVault::default();
+            let anonymized = data
+                .process(source.into(), spans.clone(), "anonymize")
+                .unwrap();
+            assert!(!anonymized.text.contains(name));
+            assert!(data.records.is_empty());
+            assert!(data.pseudonyms.is_empty());
+            let pseudonymized = data.process(source.into(), spans, "pseudonymize").unwrap();
+            assert_eq!(anonymized.text, pseudonymized.text);
+            assert_eq!(data.restore(&pseudonymized.id).unwrap(), source);
+            let ignored = protection::DetectionOptions {
+                ignored_phrases: vec![protection::DetectionRule {
+                    phrase: name.into(),
+                    entity_type: "PERSON".into(),
+                }],
+                ..options
+            };
+            let response =
+                run_detection_with_options(source.into(), vec!["PERSON".into()], vec![], ignored)
+                    .unwrap();
+            assert!(!response["suppressed"].as_array().unwrap().is_empty());
+        }
+    }
 
     #[test]
     #[ignore = "requires engines/python/.venv with the English model installed"]

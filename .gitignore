@@ -37,3 +37,6 @@ vaults/
 # OS / editor
 .DS_Store
 .idea/
+
+# Downloaded local NLP model weights
+engines/python/models/

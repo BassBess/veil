@@ -26,21 +26,26 @@ def main():
         text = request["text"]
         entities = request.get("entities")
 
-        detector = VeilDetector()
+        detector = VeilDetector(request.get("language", "en"))
 
         results = detector.suggest(
             text,
             entities,
             request.get("rules"),
+            request.get("options"),
         )
 
         json.dump(
             {
-                "detections": results
+                "detections": results,
+                "suppressed": detector.suppressed
             },
             sys.stdout,
         )
 
+    except ValueError as error:
+        # These errors contain validated setup/rule messages, never document text.
+        json.dump({"error": {"message": str(error)}}, sys.stdout)
     except Exception:
         print(
             "Detection request failed",

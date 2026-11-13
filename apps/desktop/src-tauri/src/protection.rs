@@ -827,12 +827,59 @@ pub fn list_detection_rules(vault: State<'_, VaultState>) -> Result<Vec<Detectio
         .clone())
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DetectionOptions {
+    pub language: String,
+    pub session_rules: Vec<DetectionRule>,
+    pub ignored_phrases: Vec<DetectionRule>,
+    pub required_context: Vec<DetectionRule>,
+}
+
+impl Default for DetectionOptions {
+    fn default() -> Self {
+        Self {
+            language: "en".into(),
+            session_rules: vec![],
+            ignored_phrases: vec![],
+            required_context: vec![],
+        }
+    }
+}
+
+impl DetectionOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        if !matches!(self.language.as_str(), "en" | "fr" | "es" | "ar") {
+            return Err("Choose English, French, Spanish, or Arabic".into());
+        }
+        for rules in [
+            &self.session_rules,
+            &self.ignored_phrases,
+            &self.required_context,
+        ] {
+            if rules.len() > 200
+                || rules.iter().any(|rule| {
+                    rule.phrase.trim().is_empty()
+                        || rule.phrase.len() > 500
+                        || !crate::review::supported_entity(&rule.entity_type)
+                })
+            {
+                return Err("Use up to 200 phrases per rule type, at most 500 UTF-8 bytes each, with valid categories".into());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub async fn detect_with_rules(
     text: String,
     entities: Vec<String>,
+    options: Option<DetectionOptions>,
     vault: State<'_, VaultState>,
 ) -> Result<serde_json::Value, String> {
+    let options = options.unwrap_or_default();
+    options.validate()?;
     let rules = vault
         .0
         .lock()
@@ -840,13 +887,46 @@ pub async fn detect_with_rules(
         .as_ref()
         .map(|opened| opened.data.rules.clone())
         .unwrap_or_default();
-    tauri::async_runtime::spawn_blocking(move || crate::run_detection(text, entities, rules))
-        .await
-        .map_err(|_| "The local detection task stopped unexpectedly".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::run_detection_with_options(text, entities, rules, options)
+    })
+    .await
+    .map_err(|_| "The local detection task stopped unexpectedly".to_string())?
 }
 
 #[cfg(test)]
 mod new_workflow_tests {
+    #[test]
+    fn detection_options_are_backward_compatible_and_bounded() {
+        let defaults: super::DetectionOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.language, "en");
+        assert!(defaults.validate().is_ok());
+        for language in ["en", "fr", "es", "ar"] {
+            let options = super::DetectionOptions {
+                language: language.into(),
+                ..Default::default()
+            };
+            assert!(options.validate().is_ok());
+        }
+        let mut options = defaults;
+        options.language = "unsupported".into();
+        assert!(options.validate().is_err());
+        options.language = "ar".into();
+        options.ignored_phrases = vec![super::DetectionRule {
+            phrase: "ع".repeat(251),
+            entity_type: "PERSON".into(),
+        }];
+        assert!(options.validate().is_err());
+        options.ignored_phrases = vec![
+            super::DetectionRule {
+                phrase: "Orange".into(),
+                entity_type: "ORGANIZATION".into()
+            };
+            201
+        ];
+        assert!(options.validate().is_err());
+    }
+
     #[test]
     fn resetting_requires_exact_explicit_confirmation() {
         assert!(super::check_reset_confirmation("").is_err());

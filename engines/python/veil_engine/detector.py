@@ -1,10 +1,9 @@
 from bisect import bisect_left
-import spacy
+from veil_engine.languages import load_language, arabic_entities
+from veil_engine.detection_options import validate_options, filter_candidates
 from veil_engine.context_rules import suggestions
 from tldextract import TLDExtract
-from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.predefined_recognizers import EmailRecognizer
-from presidio_analyzer.nlp_engine import NlpEngineProvider
 
 
 class OfflineEmailRecognizer(EmailRecognizer):
@@ -26,27 +25,12 @@ class VeilDetector:
         "IP_ADDRESS", "URL", "ID_NUMBER", "INDIRECT_IDENTIFIER",
     }
 
-    def __init__(self):
-        if not spacy.util.is_package("en_core_web_sm"):
-            raise RuntimeError("The local en_core_web_sm model is missing. Install the Python requirements before using detection.")
-        config = {
-            "nlp_engine_name": "spacy",
-            "models": [
-                {
-                    "lang_code": "en",
-                    "model_name": "en_core_web_sm",
-                }
-            ],
-        }
+    language = "en"
+    arabic = None
 
-        provider = NlpEngineProvider(nlp_configuration=config)
-
-        self.analyzer = AnalyzerEngine(
-            nlp_engine=provider.create_engine(),
-            supported_languages=["en"],
-        )
-        self.analyzer.registry.remove_recognizer("EmailRecognizer")
-        self.analyzer.registry.add_recognizer(OfflineEmailRecognizer())
+    def __init__(self, language="en"):
+        self.language = language
+        self.analyzer, self.arabic = load_language(language, OfflineEmailRecognizer)
 
     def detect(
         self,
@@ -92,9 +76,9 @@ class VeilDetector:
                 return []
 
         enabled = set(entities if entities is not None else self.SUPPORTED_ENTITIES)
-        available = set(self.analyzer.get_supported_entities(language="en"))
+        available = set(self.analyzer.get_supported_entities(language=self.language))
         builtin = sorted(enabled & available)
-        results = self.analyzer.analyze(text=text, language="en", entities=builtin) if builtin else []
+        results = self.analyzer.analyze(text=text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")), language=self.language, entities=builtin) if builtin else []
         detected = [
             {
                 "entity_type": result.entity_type,
@@ -102,6 +86,7 @@ class VeilDetector:
                 "start": result.start,
                 "end": result.end,
                 "confidence": round(result.score, 3),
+                "source": "recognizer",
             }
             for result in sorted(
                 results,
@@ -111,17 +96,25 @@ class VeilDetector:
 
         doc = None
         if enabled & {"ORGANIZATION", "INDIRECT_IDENTIFIER"}:
-            doc = self.analyzer.nlp_engine.process_text(text, "en").tokens
-        return detected + suggestions(text, enabled, rules, doc)
+            doc = self.analyzer.nlp_engine.process_text(text, self.language).tokens
+        return detected + arabic_entities(self.arabic, text, enabled) + suggestions(text, enabled, rules, doc, self.language)
 
     def suggest(
         self,
         text: str,
         entities: list[str] | None = None,
         rules: list[dict] | None = None,
+        options: dict | None = None,
     ) -> list[dict]:
 
-        candidates = self.detect(text, entities, rules)
+        options = {**validate_options(options, self.SUPPORTED_ENTITIES), "language": self.language}
+        candidates = self.detect(text, entities, (rules or []) + options.get("session_rules", []))
+        unique = {}
+        for item in candidates:
+            key = (item["entity_type"], item["start"], item["end"])
+            if key not in unique or item["confidence"] > unique[key]["confidence"]:
+                unique[key] = item
+        candidates, self.suppressed = filter_candidates(text, list(unique.values()), options)
 
         ranked = sorted(
             candidates,

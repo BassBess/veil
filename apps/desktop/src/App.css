@@ -189,11 +189,7 @@ textarea::placeholder {
   gap:15px;
   margin-top:20px
 }
-.detect-label {
-  font-size:14px;
-  font-weight:600;
-  margin-right:6px
-}
+
 .privacy-categories {
   display:flex;
   align-items:center;
@@ -720,7 +716,6 @@ input[type=checkbox] { accent-color: #2e5279; }
 textarea { min-height: 230px; padding: 20px; line-height: 1.8; border-radius: 5px; border-color: #bdcedd; background: #fbfcfe; font-size: 15px; }
 .input-size { font-size: 12px; color: #6b7e91; margin-bottom: 9px; }
 .detect-toolbar { gap: 14px; margin-top: 22px; }
-.detect-label { font-size: 13px; color: #435d75; }
 .privacy-category { min-height: 42px; padding: 10px 12px; font-size: 13px; border-radius: 5px; }
 .primary { min-height: 46px; padding: 12px 22px; border-radius: 5px; font-size: 14px; background: linear-gradient(110deg,#315878,#193651); }
 .panel-header h2 { font-size: 21px; font-weight: 600; color: #203e59; }
@@ -918,3 +913,10 @@ textarea:focus { background: white; }
 .review-pagination { justify-content:center; padding:16px 0; }
 .processing-options { justify-content:flex-end; width:100%; }
 .settings-form select { margin:8px; padding:8px; border:1px solid #afc4d6; border-radius:4px; color:#294a69; background:white; font:inherit; }
+
+.document-language { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; color: #3f5d77; font-size: 13px; }
+.document-language select { min-height: 42px; font-size: 13px; }
+.suppressed-results { margin: 16px 0; padding: 14px 16px; border: 1px solid #dce6ef; border-radius: 6px; background: #f7fafc; }
+.suppressed-results summary { color: #345a80; cursor: pointer; font-size: 14px; }
+.suppressed-results p, .detection-help { color: #62778b; font-size: 12px; line-height: 1.6; }
+.suppressed-results ul { max-height: 240px; overflow: auto; font-size: 13px; line-height: 1.8; }

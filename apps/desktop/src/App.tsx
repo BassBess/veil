@@ -29,6 +29,7 @@ type ReviewedDetection = Omit<Detection, "confidence"> & {
 
 type DetectionResponse = {
   detections: Detection[];
+  suppressed?: (Detection & { reason: string })[];
 };
 
 type ValidatedDetection = Pick<
@@ -105,6 +106,8 @@ function Icon({ name }: { name: IconName }) {
 
 function App() {
   const [vaultProtection, setVaultProtection] = useState<"account" | "system" | "passphrase">("system");
+  const [documentLanguage, setDocumentLanguage] = useState("en");
+  const [suppressed, setSuppressed] = useState<(Detection & { reason: string })[]>([]);
   const [savedRules, setSavedRules] = useState<DetectionRule[]>([]);
   const [settingsMessage, setSettingsMessage] = useState("");
   const [resetError, setResetError] = useState("");
@@ -328,6 +331,7 @@ function App() {
     try {
       await invoke("save_detection_rules", { rules });
       setSavedRules(rules);
+      invalidateDetectionReview();
       if (rules.length) setSelectedEntities((current) => [...new Set([...current, "INDIRECT_IDENTIFIER"])]);
       setSettingsMessage("Custom phrases saved.");
     } catch (error) { setVaultError(String(error)); }
@@ -475,11 +479,19 @@ function App() {
     }
   }
 
+  function invalidateDetectionReview() {
+    setDetections([]); setAnalyzed(false); setProcessed(null); setValidation(null);
+    setSuppressed([]); setEditingId(null); setManualSelection(null);
+    setError(""); setReviewError(""); setReviewNotice(""); setDocumentEdited(false);
+    setReviewPage(0);
+  }
+
   function toggleEntity(entity: string) {
     if (loading) {
       return;
     }
 
+    invalidateDetectionReview();
     setSelectedEntities((current) =>
       current.includes(entity)
         ? current.filter((item) => item !== entity)
@@ -498,6 +510,7 @@ function App() {
       if (analyzed) setDocumentEdited(true);
     }
     setText(value);
+    setSuppressed([]);
     setEditingId(null);
     setSelectionHint(false);
     setError("");
@@ -509,6 +522,7 @@ function App() {
 
   function replaceDocumentText(value: string) {
     setText(value);
+    setSuppressed([]);
     setDetections([]);
     setAnalyzed(false);
     setDocumentEdited(false);
@@ -689,6 +703,7 @@ function App() {
     setManualError("");
     setManualSelection(null);
     setDetections([]);
+    setSuppressed([]);
     setAnalyzed(false);
     setReviewPage(0);
     setEditingId(null);
@@ -698,6 +713,9 @@ function App() {
       const response = await invoke<DetectionResponse>("detect_with_rules", {
         text,
         entities: selectedEntities,
+        options: {
+          language: documentLanguage,
+        },
       });
 
       setDetections(
@@ -708,6 +726,7 @@ function App() {
         }))
       );
 
+      setSuppressed(response.suppressed ?? []);
       setAnalyzed(true);
       setDocumentEdited(false);
     } catch (err) {
@@ -829,7 +848,7 @@ function App() {
                 <button className="secondary-button" disabled={vaultBusy} onClick={() => exportText(record.text, "pdf")}>Export PDF</button>
                 {record.mode === "pseudonymize" && <button className="secondary-button" disabled={vaultBusy} onClick={() => restoreRecord(record.id)}>Restore original</button>}
               </div>)}
-              {restoredText !== null && <div className="processed-output"><h3>Restored original</h3><textarea readOnly aria-label="Restored original text" value={restoredText} /><button className="secondary-button" onClick={() => setRestoredText(null)}>Hide original</button></div>}
+              {restoredText !== null && <div className="processed-output"><h3>Restored original</h3><textarea readOnly dir="auto" aria-label="Restored original text" value={restoredText} /><button className="secondary-button" onClick={() => setRestoredText(null)}>Hide original</button></div>}
               {exportMessage && <p role="status">{exportMessage}</p>}
             </>}
           </>}
@@ -912,6 +931,7 @@ function App() {
           <textarea
             ref={inputRef}
             aria-label="Document input"
+            dir="auto"
             value={text}
             onChange={(event) => updateText(event.target.value)}
             disabled={loading}
@@ -951,8 +971,11 @@ function App() {
               {reviewError && <div className="error" role="alert">{reviewError}</div>}
             </div>
           )}
+          <p className="detection-help">Models run locally. Phone detection checks all supported regions automatically. Scores are recognizer signals, not probabilities. Automatic indirect-description suggestions currently cover English; use custom phrases for other languages.</p>
           <div className="detect-toolbar">
-            <span className="detect-label">Detect</span>
+            <label className="document-language">Document language<select aria-label="Document language" disabled={loading} value={documentLanguage} onChange={event => { setDocumentLanguage(event.target.value); invalidateDetectionReview(); }}>
+              <option value="en">English</option><option value="fr">Français</option><option value="es">Español</option><option value="ar">العربية</option>
+            </select></label>
             <details className="category-picker"><summary>Data categories ({selectedEntities.length})</summary>
             <div className="privacy-categories">
               {PRIVACY_CATEGORIES.map((category) => (
@@ -1000,6 +1023,7 @@ function App() {
             <label className="repeat-choice"><input type="checkbox" checked={linkRepeated} disabled={loading || editingId !== null} onChange={event => setLinkRepeated(event.target.checked)} />Apply individual accept/reject decisions to repeated matches</label>
             <p>Matches use the same text and category. Accepting a match also finds other exact occurrences; previously rejected occurrences and overlapping detections stay unchanged. Turn this off to decide one occurrence at a time.</p>
           </div>}
+          {suppressed.length > 0 && <details className="suppressed-results"><summary>{suppressed.length} suggestions excluded during detection</summary><p>Excluded suggestions will stay unchanged. Select text in the document to add an item manually if needed.</p><ul>{suppressed.map((item, index) => <li key={index}><bdi>{item.text}</bdi> · {PRIVACY_CATEGORIES.find(category => category.value === item.entity_type)?.label} · {item.reason}</li>)}</ul></details>}
           {reviewNotice && <p className="review-notice" role="status">{reviewNotice}</p>}
           {detections.length > 0 && filteredDetections.length === 0 && <p role="status" className="selection-hint">No detections match these filters.</p>}
           {detections.length === 0 ? (
@@ -1009,7 +1033,7 @@ function App() {
               {visibleDetections.slice(visibleReviewPage * 50, (visibleReviewPage + 1) * 50).map((item) => (
                 <div className={`detection-item ${item.status} ${editingId === item.id ? "editing" : ""}`} key={item.id}>
 
-                  <div className="entity-text"><button className="detected-text-link" disabled={loading || !!item.needsCorrection} onClick={() => revealDetection(item)} title="Show in document"><strong>{item.text}</strong></button>{(() => {
+                  <div className="entity-text"><button className="detected-text-link" disabled={loading || !!item.needsCorrection} onClick={() => revealDetection(item)} title="Show in document"><strong><bdi>{item.text}</bdi></strong></button>{(() => {
                     const group = reviewGroups.find(group => matchKey(group[0]) === matchKey(item))!;
                     return group.length > 1 && <button className="repeat-count occurrence-button" disabled={loading || editingId !== null} onClick={() => nextOccurrence(item)} title="Show next occurrence in document">{group.length} matches · {group.findIndex(hit => hit.id === item.id) + 1}/{group.length} ↗</button>;
                   })()}<span className="review-status">{item.needsCorrection && item.status !== "rejected" ? "Text removed — edit or reject" : item.status === "pending" ? "Pending review" : item.status === "rejected" ? "Rejected" : "Accepted"}</span></div>
@@ -1059,7 +1083,7 @@ function App() {
             <h2>{processed.record.mode === "pseudonymize" ? "Pseudonymized text" : "Anonymized text"}</h2>
             <p>Review the output before sharing. Rejected and undetected information remains in the text.</p>
             {processed.record.mode === "anonymize" && <p>Anonymized text stays in this workspace and is not saved to the Vault. Export it before closing the app.</p>}
-            <textarea readOnly aria-label="Processed text" value={processed.record.text} />
+            <textarea readOnly dir="auto" aria-label="Processed text" value={processed.record.text} />
             <button className="primary" onClick={() => exportText(processed.record.text)}><Icon name="document" />Export TXT</button>
             <button className="secondary-button" onClick={() => exportText(processed.record.text, "pdf")}><Icon name="document" />Export PDF</button>
             <p>PDF export creates a new text-layout PDF from this processed preview.</p>
