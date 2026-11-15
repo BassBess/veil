@@ -227,3 +227,13 @@ Delivery order:
 - CAMeLBERT MSA NER model card, dataset, and usage:
   https://huggingface.co/CAMeL-Lab/bert-base-arabic-camelbert-msa-ner
 - CAMeL Tools NER API: https://camel-tools.readthedocs.io/en/latest/api/ner.html
+
+## Projects in the Vault
+
+Create a project from the Vault page and select it in the project dropdown before reviewing files. All pseudonymized documents in that project reuse its identity mappings. The same text in another project is treated as a separate identity and receives a different token; token counters are shared across the Vault to avoid ambiguous duplicate tokens.
+
+Saved identities, document history, restoration, and saved detection phrases are scoped to the selected project. Existing Vault identities and documents remain in **General**, without changing their tokens. Project data stays inside the existing encrypted local Vault file. Switching projects keeps the source text but clears review decisions and the output preview so they can be reviewed under the new project. Anonymization remains temporary and independent of projects.
+
+Identity lookup uses an in-memory project-ID index, followed by an entity-type and normalized-value index inside that project. Indexes are rebuilt lazily after opening the encrypted Vault and invalidated when entries are removed. Person, organization, and location names ignore case and repeated whitespace; abbreviated or partial names are separate identities. No fuzzy identity matching is performed.
+
+The active project stays visible while scrolling through pseudonymization and appears beside the processed output. Named projects can be deleted from the Vault page by typing the project name. Deletion removes that project's mappings, saved documents and originals, and saved detection phrases; the confirmation warns that exported documents may permanently lose their re-identification path. The built-in General project remains available. Deleting an individual mapping preserves saved originals but warns about re-identifying exported documents. Token counters are never reset by either deletion. Vault-wide sequential tokens prevent collisions between projects; they are not a guarantee of cross-project unlinkability, since document content and other information may still allow linkage.

@@ -7,6 +7,7 @@ import { rebaseDetections } from "./rebaseDetections";
 import { applyReviewDecision, groupDetections, matchKey, prepareProcessing } from "./reviewActions";
 
 type VaultStatus = { exists: boolean; unlocked: boolean; account_supported: boolean; authentication_required: boolean; code_required: boolean; needs_migration: boolean };
+type Project = { id: string; name: string; documents: number; identities: number };
 type DetectionRule = { phrase: string; entity_type: string };
 type SavedIdentity = { id: string; entity_type: string; original: string; pseudonym: string };
 type ProcessedRecord = { id: string; mode: string; text: string; count: number };
@@ -86,7 +87,7 @@ function rangesOverlap(
   return first.start < second.end && first.end > second.start;
 }
 
-type IconName = "document" | "upload" | "home" | "database" | "vault" | "settings" | "arrow" | "plus" | "edit" | "trash";
+type IconName = "document" | "upload" | "home" | "database" | "vault" | "settings" | "arrow" | "plus" | "edit" | "trash" | "folder" | "users" | "search" | "check" | "phrases";
 
 function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
@@ -99,12 +100,22 @@ function Icon({ name }: { name: IconName }) {
     arrow: <><path d="M4 12h16m-6-6 6 6-6 6" /></>,
     plus: <path d="M12 5v14M5 12h14" />,
     edit: <><path d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-5-5L4 14Z" /></>,
+    folder: <><path d="M3 7V5a2 2 0 0 1 2-2h5l3 3h6a2 2 0 0 1 2 2v2" /><path d="M3 8h18l-3 12H2Z" /></>,
+    users: <><circle cx="9" cy="7" r="4" /><path d="M2 21v-3a6 6 0 0 1 12 0v3M17 3a4 4 0 0 1 0 8M18 15a5 5 0 0 1 4 5v1" /></>,
+    search: <><circle cx="10" cy="10" r="7" /><path d="m15 15 6 6" /></>,
+    check: <path d="m5 12 4 4L20 5" />,
+    phrases: <><path d="M5 14h5V6H3v8c0 4 2 5 5 5M17 14h5V6h-7v8c0 4 2 5 5 5" /></>,
     trash: <><path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7" /></>,
   };
   return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
 function App() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectId, setProjectId] = useState("default");
+  const [projectQuery, setProjectQuery] = useState("");
+  const [vaultTab, setVaultTab] = useState<"identities" | "history" | "phrases">("identities");
+  const [projectName, setProjectName] = useState("");
   const [vaultProtection, setVaultProtection] = useState<"account" | "system" | "passphrase">("system");
   const [documentLanguage, setDocumentLanguage] = useState("en");
   const [suppressed, setSuppressed] = useState<(Detection & { reason: string })[]>([]);
@@ -114,6 +125,9 @@ function App() {
   const importInFlightRef = useRef(false);
   const [dragging, setDragging] = useState(false);
   const vaultPromptRef = useRef<HTMLDialogElement>(null);
+  const projectDeleteDialogRef = useRef<HTMLDialogElement>(null);
+  const projectDeleteNameRef = useRef<HTMLInputElement>(null);
+  const [projectDeleteError, setProjectDeleteError] = useState("");
   const resetDialogRef = useRef<HTMLDialogElement>(null);
   const resetConfirmationRef = useRef<HTMLInputElement>(null);
   const protectionPasswordRef = useRef<HTMLInputElement>(null);
@@ -192,23 +206,28 @@ function App() {
     message: string;
   } | null>(null);
 
-  const reviewSnapshot = JSON.stringify([text, detections, workspaceView]);
+  const activeProjectName = projects.find((project) => project.id === projectId)?.name ?? (projectId === "default" ? "General" : "Loading project…");
 
-  const refreshVault = useCallback(() => {
+  const reviewSnapshot = JSON.stringify([text, detections, workspaceView, projectId]);
+
+  const refreshVault = useCallback((scopeId = projectId) => {
     const request = ++vaultLoadRef.current;
     return invoke<VaultStatus>("vault_status").then(async (status) => {
       if (request !== vaultLoadRef.current) return;
       if (status.unlocked) {
-        const [records, identities, rules] = await Promise.all([
-          invoke<ProcessedRecord[]>("list_vault_records"),
-          invoke<SavedIdentity[]>("list_saved_identities"),
-          invoke<DetectionRule[]>("list_detection_rules"),
+        const [records, identities, rules, projectList] = await Promise.all([
+          invoke<ProcessedRecord[]>("list_vault_records", { projectId: scopeId }),
+          invoke<SavedIdentity[]>("list_saved_identities", { projectId: scopeId }),
+          invoke<DetectionRule[]>("list_detection_rules", { projectId: scopeId }),
+          invoke<Project[]>("list_projects"),
         ]);
         if (request !== vaultLoadRef.current) return;
+        setProjects(projectList);
         setVaultRecords(records);
         setSavedIdentities(identities);
         setSavedRules(rules);
       } else {
+        setProjects([]); setSavedRules([]);
         setVaultRecords([]);
         setSavedIdentities([]);
         setRestoredText(null);
@@ -219,7 +238,7 @@ function App() {
     }).catch((error) => {
       if (request === vaultLoadRef.current) setVaultError(String(error));
     });
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     let active = true;
@@ -228,6 +247,40 @@ function App() {
     }).catch((error) => { if (active) setVaultError(String(error)); });
     return () => { active = false; };
   }, [refreshVault]);
+
+  function selectProject(id: string) {
+    if (id === projectId) return;
+    ++vaultLoadRef.current;
+    setProjectId(id);
+    setSavedIdentities([]); setVaultRecords([]); setSavedRules([]);
+    setRestoredText(null); setProcessed(null); setIdentityQuery(""); setSettingsMessage("");
+    setDetections([]); setSuppressed([]); setAnalyzed(false);
+    setEditingId(null); setManualSelection(null); setReviewError(""); setManualError(""); setReviewNotice("");
+    setVaultError(""); setExportMessage(""); setValidation(null);
+  }
+
+  async function createProject(event: React.FormEvent) {
+    event.preventDefault();
+    setVaultBusy(true); setVaultError("");
+    try {
+      const id = await invoke<string>("create_project", { name: projectName });
+      setProjectName("");
+      selectProject(id);
+    } catch (error) { setVaultError(String(error)); }
+    finally { setVaultBusy(false); }
+  }
+
+  async function deleteProject(event: React.FormEvent) {
+    event.preventDefault();
+    const confirmation = projectDeleteNameRef.current?.value ?? "";
+    setVaultBusy(true); setProjectDeleteError("");
+    try {
+      await invoke("delete_project", { projectId, confirmation });
+      projectDeleteDialogRef.current?.close();
+      selectProject("default");
+    } catch (error) { setProjectDeleteError(String(error)); }
+    finally { setVaultBusy(false); }
+  }
 
   async function unlockVault(event: React.FormEvent) {
     event.preventDefault();
@@ -270,7 +323,7 @@ function App() {
     setVaultBusy(true);
     setVaultError("");
     try {
-      await invoke("save_identity", {
+      await invoke("save_identity", { projectId,
         original: identityNameRef.current?.value ?? "",
         entityType: identityCategory,
       });
@@ -280,11 +333,21 @@ function App() {
     finally { setVaultBusy(false); }
   }
 
+  async function deleteMapping(identity: SavedIdentity) {
+    if (!window.confirm(`Delete the saved mapping for “${identity.original}” (${identity.pseudonym}) from this project? This may permanently prevent re-identification of exported documents using this mapping. Saved originals in document history can still be restored. Processing this identity again will create a new token.`)) return;
+    setVaultBusy(true); setVaultError("");
+    try {
+      await invoke("delete_saved_identity", { id: identity.id, projectId });
+      await refreshVault();
+    } catch (error) { setVaultError(String(error)); }
+    finally { setVaultBusy(false); }
+  }
+
   async function applySavedIdentity(id: string) {
     setLoading(true);
     setVaultError("");
     try {
-      const found = await invoke<ValidatedDetection[]>("find_saved_identity", { id, text });
+      const found = await invoke<ValidatedDetection[]>("find_saved_identity", { id, text, projectId });
       if (!found.length) {
         setVaultError("No matches in the current document. Paste or upload a document containing this identity first.");
         return;
@@ -329,7 +392,7 @@ function App() {
       .filter(Boolean).map((phrase) => ({ phrase, entity_type: "INDIRECT_IDENTIFIER" }));
     setVaultBusy(true); setVaultError(""); setSettingsMessage("");
     try {
-      await invoke("save_detection_rules", { rules });
+      await invoke("save_detection_rules", { rules, projectId });
       setSavedRules(rules);
       invalidateDetectionReview();
       if (rules.length) setSelectedEntities((current) => [...new Set([...current, "INDIRECT_IDENTIFIER"])]);
@@ -351,6 +414,7 @@ function App() {
     setVaultBusy(true); setResetError("");
     try {
       await invoke("reset_vault", { confirmation });
+      setProjectId("default");
       ++vaultLoadRef.current;
       setVaultRecords([]); setSavedIdentities([]); setSavedRules([]);
       if (rulesRef.current) rulesRef.current.value = "";
@@ -358,7 +422,7 @@ function App() {
       setExportMessage("");
       setProcessed(null); setRestoredText(null); setIdentityQuery("");
       setSettingsMessage("Vault reset. Saved identities, mappings, rules, and history were cleared.");
-      await refreshVault();
+      await refreshVault("default");
       resetDialogRef.current?.close();
       if (resetConfirmationRef.current) resetConfirmationRef.current.value = "";
     } catch (error) { setResetError(String(error)); }
@@ -406,21 +470,26 @@ function App() {
   }
 
   async function restoreRecord(id: string) {
+    setVaultBusy(true);
     setVaultError("");
     setRestoredText(null);
-    try { setRestoredText(await invoke<string>("restore_vault_record", { id })); }
+    try { setRestoredText(await invoke<string>("restore_vault_record", { id, projectId })); }
     catch (error) { setVaultError(String(error)); }
+    finally { setVaultBusy(false); }
   }
 
   async function clearVault() {
-    if (!window.confirm("Clear saved document history? Document restoration will no longer be available. Your saved identities and pseudonyms will be kept.")) return;
+    if (!window.confirm("Clear document history for this project? Document restoration will no longer be available. Your saved identities and pseudonyms will be kept.")) return;
+    setVaultBusy(true);
     try {
-      await invoke("clear_vault_records");
+      await invoke("clear_vault_records", { projectId });
       setVaultRecords([]);
       setRestoredText(null);
       setProcessed(null);
       setVaultError("");
+      await refreshVault();
     } catch (error) { setVaultError(String(error)); }
+    finally { setVaultBusy(false); }
   }
 
 
@@ -710,7 +779,7 @@ function App() {
     setSelectionHint(false);
 
     try {
-      const response = await invoke<DetectionResponse>("detect_with_rules", {
+      const response = await invoke<DetectionResponse>("detect_with_rules", { projectId,
         text,
         entities: selectedEntities,
         options: {
@@ -757,7 +826,7 @@ function App() {
       setValidation({snapshot: reviewSnapshot, success: false, message: error instanceof Error ? error.message : String(error)});
       return;
     }
-    const snapshot = JSON.stringify([text, nextDetections, workspaceView]);
+    const snapshot = JSON.stringify([text, nextDetections, workspaceView, projectId]);
     setProcessed(null);
     setLoading(true);
     setValidation(null);
@@ -765,7 +834,7 @@ function App() {
     try {
       const mode = workspaceView === "Pseudonymize" ? "pseudonymize" : "anonymize";
       const result = await invoke<ProcessedRecord>("process_reviewed_text", {
-        text, detections: accepted, mode,
+        text, detections: accepted, mode, projectId,
       });
       setProcessed({record: result, snapshot, mode: workspaceView});
       setExportMessage("");
@@ -806,19 +875,25 @@ function App() {
         <div className="sidebar-wave" aria-hidden="true" />
       </header>
 
-      <main className="workspace">
-        <header className="intro">
+      <main className={`workspace ${workspaceView === "Vault" && vaultStatus.unlocked ? "vault-workspace" : ""}`}>
+        <header className="intro" hidden={workspaceView === "Vault" && vaultStatus.unlocked}>
           <h1>{workspaceView === "Anonymize" ? "Anonymization workspace" : workspaceView === "Pseudonymize" ? "Pseudonymization workspace" : workspaceView}</h1>
           <p>{workspaceView === "Vault" ? "Your saved people, pseudonyms, and processed documents." : workspaceView === "Settings" ? "Manage your detection preferences." : "Inspect your documents and review sensitive information before sharing."}</p>
         </header>
 
-        {(workspaceView === "Vault" || workspaceView === "Settings") && <section className="view-details">
-          {workspaceView === "Vault" && <>
-            <div className="vault-display" aria-hidden="true"><div className="vault-mark is-open"><div className="vault-door"><span className="vault-wheel"><i /><i /></span><span className="vault-handle" /></div></div></div>
-            <h2>Your Vault</h2>
-            <p>People and identity mappings are saved locally in an encrypted Vault. Their pseudonyms remain the same when you reopen Veil.</p>
+        {vaultStatus.unlocked && workspaceView !== "Anonymize" && workspaceView !== "Vault" && <section className="project-toolbar" aria-label="Project">
+          <label>Project<select value={projectId} disabled={loading || vaultBusy || importing} onChange={(event) => selectProject(event.target.value)}>
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name} · {project.documents} documents · {project.identities} identities</option>)}
+          </select></label>
+          <p>Mappings and documents are shared within this project. Other projects keep separate identities.</p>
+        </section>}
+
+        {(workspaceView === "Vault" || workspaceView === "Settings") && <section className={workspaceView === "Vault" && vaultStatus.unlocked ? "vault-view" : "view-details"}>
+          {workspaceView === "Vault" && (!vaultStatus.unlocked ? <div className="vault-locked">
+            <div className="vault-display" aria-hidden="true"><div className="vault-mark"><div className="vault-door"><span className="vault-wheel"><i /><i /></span><span className="vault-handle" /></div></div></div>
+            <h2>Your Vault</h2><p>Your projects, identities, and documents, encrypted on this device.</p>
             {vaultError && <div className="error" role="alert">{vaultError}</div>}
-            {!vaultStatus.unlocked ? <form className="vault-unlock" onSubmit={unlockVault}>
+            <form className="vault-unlock" onSubmit={unlockVault}>
               <h3>{vaultStatus.exists ? "Unlock your Vault" : "Create your Vault"}</h3>
               {(vaultStatus.code_required || (!vaultStatus.exists && (vaultProtection === "passphrase" || !vaultStatus.account_supported))) && <>
                 <label>Passphrase<input ref={vaultPasswordRef} type="password" autoComplete={vaultStatus.exists ? "current-password" : "new-password"} required minLength={vaultStatus.exists ? 1 : 12} maxLength={1024} disabled={vaultBusy} /></label>
@@ -826,22 +901,65 @@ function App() {
               </>}
               <p>{vaultStatus.code_required ? "Enter your Vault passphrase. You can change password protection in Settings after unlocking." : vaultProtection === "passphrase" ? "Keep this passphrase to reopen your encrypted Vault." : vaultProtection === "system" ? "Your computer will ask you to verify with Windows Hello or macOS sign-in. VEIL never receives your system password or biometric data." : "Protected by your signed-in account on this computer, with no separate Vault password."}</p>
               <button className="primary" type="submit" disabled={vaultBusy}>{vaultBusy ? "Opening Vault..." : vaultStatus.authentication_required || (!vaultStatus.exists && vaultProtection === "system") ? "Verify with system sign-in" : vaultStatus.exists ? "Unlock Vault" : "Create Vault"}</button>
-            </form> : <>
-              <div className="vault-heading"><h3>Saved identities</h3><button className="secondary-button" disabled={vaultBusy || loading} onClick={lockVault}><Icon name="vault" />Lock Vault</button></div>
-              <form className="identity-form" onSubmit={addIdentity}>
-                <label>Name or identifying text<input ref={identityNameRef} placeholder="John Smith" required maxLength={1000} disabled={vaultBusy || loading} /></label>
-                <label>Category<select value={identityCategory} onChange={(event) => setIdentityCategory(event.target.value)} disabled={vaultBusy || loading}>{PRIVACY_CATEGORIES.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select></label>
-                <button className="primary" type="submit" disabled={vaultBusy || loading}><Icon name="plus" />Save identity</button>
+            </form>
+          </div> : <div className="vault-layout">
+            <aside className="projects-panel" aria-label="Projects">
+              <h2><Icon name="folder" />Projects</h2>
+              <p>Keep identities and documents separate, with consistent mappings in each project.</p>
+              <div className="vault-search"><Icon name="search" /><input type="search" aria-label="Search projects" placeholder="Search projects…" value={projectQuery} onChange={(event) => setProjectQuery(event.target.value)} /></div>
+              <div className="project-list" aria-label="Choose a project">
+                {projects.filter((project) => project.name.toLowerCase().includes(projectQuery.toLowerCase())).map((project) => <button type="button" key={project.id} className={`project-item ${project.id === projectId ? "selected" : ""}`} aria-current={project.id === projectId ? "true" : undefined} disabled={loading || vaultBusy || importing} onClick={() => selectProject(project.id)}>
+                  <Icon name="folder" /><span><strong>{project.name}</strong><small>{project.documents} documents · {project.identities} identities</small></span>{project.id === projectId && <Icon name="check" />}
+                </button>)}
+                {!projects.some((project) => project.name.toLowerCase().includes(projectQuery.toLowerCase())) && <p className="project-no-results">No projects match your search.</p>}
+              </div>
+              <form className="project-create" onSubmit={createProject}>
+                <h3>Create new project</h3>
+                <input aria-label="New project name" placeholder="New project name" value={projectName} maxLength={80} onChange={(event) => setProjectName(event.target.value)} disabled={loading || vaultBusy} required />
+                <button className="primary" disabled={loading || vaultBusy || !projectName.trim()}><Icon name="plus" />Create project</button>
               </form>
-              <input className="identity-search" type="search" aria-label="Search saved identities" placeholder="Search by name or pseudonym" value={identityQuery} onChange={(event) => setIdentityQuery(event.target.value)} />
-              <div className="identity-list">{savedIdentities.filter((identity) => (identity.original + " " + identity.pseudonym).toLowerCase().includes(identityQuery.toLowerCase())).map((identity) =>
-                <div className="identity-row" key={identity.id}><div><strong>{identity.original}</strong><span>{PRIVACY_CATEGORIES.find((category) => category.value === identity.entity_type)?.label}</span></div><code>{identity.pseudonym}</code><button className="secondary-button" disabled={loading || vaultBusy || !text.trim()} onClick={() => applySavedIdentity(identity.id)}>Find in current document</button></div>
-              )}</div>
-              {!savedIdentities.length && <p>Save an identity above, or pseudonymize reviewed information to add it automatically.</p>}
-              {savedIdentities.length > 0 && !savedIdentities.some((identity) => (identity.original + " " + identity.pseudonym).toLowerCase().includes(identityQuery.toLowerCase())) && <p>No saved identities match your search.</p>}
-              <div className="vault-heading"><h3>Document history</h3><button className="secondary-button" disabled={vaultBusy || loading || !vaultRecords.length} onClick={clearVault}>Clear document history</button></div>
+              {projectId !== "default" && <button className="project-delete-link" disabled={loading || vaultBusy || importing} onClick={() => { setProjectDeleteError(""); if (projectDeleteNameRef.current) projectDeleteNameRef.current.value = ""; projectDeleteDialogRef.current?.showModal(); }}><Icon name="trash" />Delete selected project</button>}
+            </aside>
+            <section className="vault-panel" aria-label={`Vault for ${activeProjectName}`}>
+              <header className="vault-panel-header">
+                <div className="vault-panel-title"><div className="vault-mark is-open" aria-hidden="true"><div className="vault-door"><span className="vault-wheel"><i /><i /></span><span className="vault-handle" /></div></div><h2>Vault</h2></div>
+                <label className="vault-project-select"><span className="sr-only">Selected project</span><select aria-label="Selected project" value={projectId} disabled={loading || vaultBusy || importing} onChange={(event) => selectProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>Project: {project.name}</option>)}</select></label>
+                <button className="secondary-button vault-lock-button" disabled={vaultBusy || loading} onClick={lockVault}><Icon name="vault" />Lock Vault</button>
+              </header>
+              <div className="vault-tabs" role="tablist" aria-label="Project contents" onKeyDown={(event) => {
+                if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                event.preventDefault();
+                const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+                const index = tabs.indexOf(document.activeElement as HTMLButtonElement);
+                const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+                tabs[next]?.focus(); tabs[next]?.click();
+              }}>
+                {([{ id: "identities", label: "Identities", icon: "users" }, { id: "history", label: "Document history", icon: "document" }, { id: "phrases", label: "Saved phrases", icon: "phrases" }] as const).map((tab) => <button type="button" key={tab.id} id={`vault-tab-${tab.id}`} role="tab" aria-selected={vaultTab === tab.id} aria-controls={`vault-panel-${tab.id}`} tabIndex={vaultTab === tab.id ? 0 : -1} onClick={() => { setVaultTab(tab.id); setExportMessage(""); }}><Icon name={tab.icon} />{tab.label}</button>)}
+              </div>
+              {vaultError && <div className="error" role="alert">{vaultError}</div>}
+              {vaultTab === "identities" && <div role="tabpanel" id="vault-panel-identities" aria-labelledby="vault-tab-identities" className="vault-tab-content">
+                <h3>Add identity</h3>
+                <form className="identity-form" onSubmit={addIdentity}>
+                  <label>Name or identifying text<input ref={identityNameRef} placeholder="John Smith" required maxLength={1000} disabled={vaultBusy || loading} /></label>
+                  <label>Category<select value={identityCategory} onChange={(event) => setIdentityCategory(event.target.value)} disabled={vaultBusy || loading}>{PRIVACY_CATEGORIES.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select></label>
+                  <button className="primary" type="submit" disabled={vaultBusy || loading}><Icon name="plus" />Save identity</button>
+                </form>
+                <div className="vault-search"><Icon name="search" /><input type="search" aria-label="Search saved identities" placeholder="Search by name or pseudonym…" value={identityQuery} onChange={(event) => setIdentityQuery(event.target.value)} /></div>
+                <div className="identity-table-wrap"><table className="identity-table">
+                  <thead><tr><th scope="col">Name or identifying text</th><th scope="col">Category</th><th scope="col">Pseudonym</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+                  <tbody>{savedIdentities.filter((identity) => (identity.original + " " + identity.pseudonym).toLowerCase().includes(identityQuery.toLowerCase())).map((identity) => <tr key={identity.id}>
+                    <td><strong>{identity.original}</strong></td><td>{PRIVACY_CATEGORIES.find((category) => category.value === identity.entity_type)?.label}</td><td><code>{identity.pseudonym}</code></td>
+                    <td><div className="identity-actions"><button className="secondary-button" disabled={loading || vaultBusy || !text.trim()} onClick={() => applySavedIdentity(identity.id)}>Find in document</button><button className="secondary-button mapping-delete icon-button" aria-label={`Delete mapping for ${identity.original}`} title="Delete mapping" disabled={loading || vaultBusy} onClick={() => deleteMapping(identity)}><Icon name="trash" /></button></div></td>
+                  </tr>)}</tbody>
+                </table>
+                {!savedIdentities.length && <div className="vault-empty"><Icon name="users" /><h3>No identities saved yet</h3><p>Add an identity above, or pseudonymize reviewed information to save it automatically.</p></div>}
+                {savedIdentities.length > 0 && !savedIdentities.some((identity) => (identity.original + " " + identity.pseudonym).toLowerCase().includes(identityQuery.toLowerCase())) && <div className="vault-empty"><Icon name="search" /><h3>No matching identities</h3><p>Try another name or pseudonym.</p></div>}
+                </div>
+              </div>}
+              {vaultTab === "history" && <div role="tabpanel" id="vault-panel-history" aria-labelledby="vault-tab-history" className="vault-tab-content">
+                <div className="vault-heading"><div><h3>Document history</h3><p>Processed documents in {activeProjectName}.</p></div><button className="secondary-button" disabled={vaultBusy || loading || !vaultRecords.length} onClick={clearVault}>Clear history</button></div>
               <p>Clearing document history keeps your saved people and pseudonyms.</p>
-              {vaultRecords.length === 0 ? <p>No processed documents saved yet.</p> : vaultRecords.map((record, index) => <div className="vault-record" key={record.id}>
+              {vaultRecords.length === 0 ? <div className="vault-empty"><Icon name="document" /><h3>No documents saved yet</h3><p>Pseudonymize a document in this project to see it here.</p><button className="secondary-button" onClick={() => setWorkspaceView("Pseudonymize")}>Go to pseudonymization<Icon name="arrow" /></button></div> : vaultRecords.map((record, index) => <div className="vault-record" key={record.id}>
                 <strong>Document {vaultRecords.length - index}</strong>
                 <span>{record.mode === "pseudonymize" ? "Pseudonymized" : "Anonymized"} · {record.count} replacements</span>
                 <button className="secondary-button" disabled={vaultBusy} onClick={() => exportText(record.text)}><Icon name="document" />Export TXT</button>
@@ -850,20 +968,25 @@ function App() {
               </div>)}
               {restoredText !== null && <div className="processed-output"><h3>Restored original</h3><textarea readOnly dir="auto" aria-label="Restored original text" value={restoredText} /><button className="secondary-button" onClick={() => setRestoredText(null)}>Hide original</button></div>}
               {exportMessage && <p role="status">{exportMessage}</p>}
-            </>}
-          </>}
+              </div>}
+              {vaultTab === "phrases" && <div role="tabpanel" id="vault-panel-phrases" aria-labelledby="vault-tab-phrases" className="vault-tab-content">
+                <h3>Saved phrases</h3><p>Enter one identifying phrase per line to suggest it during detection in <strong>{activeProjectName}</strong>.</p>
+                <form className="settings-form vault-phrases-form" onSubmit={saveRules}>
+                  <label>Identifying phrases<textarea key={projectId + JSON.stringify(savedRules)} ref={rulesRef} aria-label="Custom identifying phrases" defaultValue={savedRules.map((rule) => rule.phrase).join("\n")} placeholder="A distinctive job title or description" disabled={vaultBusy || loading} /></label>
+                  <button className="primary" disabled={vaultBusy || loading}>Save phrases</button>
+                </form>
+                {settingsMessage && <p role="status">{settingsMessage}</p>}
+              </div>}
+            </section>
+          </div>)}
 
           {workspaceView === "Settings" && <>
             <h2>Detection categories</h2>
             <p>Select the types of information to find and protect. Extra categories are optional.</p>
             <div className="settings-category-grid">{PRIVACY_CATEGORIES.map((category) => <label className="privacy-category" key={category.value}><input type="checkbox" disabled={loading} checked={selectedEntities.includes(category.value)} onChange={() => toggleEntity(category.value)} /><span>{category.label}</span></label>)}</div>
             <p className="selection-hint">Indirect identifiers include distinctive descriptions such as a rare role combined with a place or nationality. Suggestions need your review; uniqueness cannot be determined reliably from a document alone.</p>
-            <h3>Custom identifying phrases</h3>
-            <p>Enter one phrase per line to suggest it for review. Phrases are matched literally and saved in your encrypted Vault.</p>
-            {vaultStatus.unlocked ? <form className="settings-form" onSubmit={saveRules}>
-              <label>Identifying phrases<textarea ref={rulesRef} aria-label="Custom identifying phrases" defaultValue={savedRules.map((rule) => rule.phrase).join("\n")} placeholder="A distinctive job title or description" /></label>
-              <button className="secondary-button" disabled={vaultBusy || loading}>Save phrases</button>
-            </form> : <button className="secondary-button" onClick={() => setWorkspaceView("Vault")}>Open Vault to manage phrases</button>}
+            <h3>Saved phrases</h3><p>Manage identifying phrases for each project in the Vault.</p>
+            <button className="secondary-button" onClick={() => { setVaultTab("phrases"); setWorkspaceView("Vault"); void refreshVault(); }}>Manage saved phrases<Icon name="arrow" /></button>
             <h3>Document import</h3>
             <div className="settings-form">
               <label>Maximum file size <select aria-label="Maximum document file size" value={importLimitMb} disabled={loading || importing} onChange={event => setImportLimitMb(Number(event.target.value))}>
@@ -1081,6 +1204,7 @@ function App() {
         </section>
           {processed?.snapshot === reviewSnapshot && processed.mode === workspaceView && <section className="processed-output">
             <h2>{processed.record.mode === "pseudonymize" ? "Pseudonymized text" : "Anonymized text"}</h2>
+            {processed.record.mode === "pseudonymize" && <p className="output-project">Project: <strong>{activeProjectName}</strong></p>}
             <p>Review the output before sharing. Rejected and undetected information remains in the text.</p>
             {processed.record.mode === "anonymize" && <p>Anonymized text stays in this workspace and is not saved to the Vault. Export it before closing the app.</p>}
             <textarea readOnly dir="auto" aria-label="Processed text" value={processed.record.text} />
@@ -1091,6 +1215,15 @@ function App() {
           </section>}
         </div>
       </main>
+      <dialog ref={projectDeleteDialogRef} className="vault-prompt" aria-labelledby="project-delete-title" aria-describedby="project-delete-description" onCancel={(event) => { if (vaultBusy) event.preventDefault(); }}>
+        <form onSubmit={deleteProject}>
+          <h2 id="project-delete-title">Delete {activeProjectName}?</h2>
+          <p id="project-delete-description">This permanently removes this project's mappings, saved documents, originals, and detection phrases. You may permanently lose the ability to re-identify its exported pseudonymized documents.</p>
+          <label>Type <strong>{activeProjectName}</strong> to confirm<input ref={projectDeleteNameRef} aria-label="Project name to confirm deletion" autoComplete="off" required disabled={vaultBusy} /></label>
+          {projectDeleteError && <p className="error" role="alert">{projectDeleteError}</p>}
+          <div className="data-actions"><button type="button" className="secondary-button" disabled={vaultBusy} onClick={() => projectDeleteDialogRef.current?.close()}>Cancel</button><button className="danger-button" disabled={vaultBusy}>Delete project</button></div>
+        </form>
+      </dialog>
       <dialog ref={vaultPromptRef} className="vault-prompt" aria-labelledby="vault-prompt-title" aria-describedby="vault-prompt-description">
         <div className="vault-prompt-icon"><Icon name="vault" /></div>
         <h2 id="vault-prompt-title">{vaultStatus.exists ? "Unlock your Vault" : "Create your Vault"}</h2>

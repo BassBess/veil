@@ -1,8 +1,8 @@
-use crate::review::{validate_reviewed_detections, ReviewedEntity};
+use crate::review::{ReviewedEntity, validate_reviewed_detections};
 use crate::vault_storage::UnlockedVault;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use zeroize::Zeroizing;
@@ -31,12 +31,157 @@ pub struct SavedIdentity {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SessionVault {
+    #[serde(skip)]
+    project_index: OnceLock<HashMap<String, usize>>,
+    #[serde(skip)]
+    identity_index: OnceLock<HashMap<(String, String), usize>>,
+    #[serde(default)]
+    projects: Vec<VaultProject>,
     pub(crate) records: Vec<StoredRecord>,
     pub(crate) pseudonyms: Vec<SavedIdentity>,
     #[serde(default)]
     counters: HashMap<String, usize>,
     #[serde(default)]
     pub(crate) rules: Vec<DetectionRule>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct VaultProject {
+    id: String,
+    name: String,
+    data: SessionVault,
+}
+
+#[derive(Serialize)]
+pub struct ProjectSummary {
+    id: String,
+    name: String,
+    documents: usize,
+    identities: usize,
+}
+
+impl SessionVault {
+    fn project_position(&self, id: &str) -> Result<usize, String> {
+        self.project_index
+            .get_or_init(|| {
+                self.projects
+                    .iter()
+                    .enumerate()
+                    .map(|(index, project)| (project.id.clone(), index))
+                    .collect()
+            })
+            .get(id)
+            .copied()
+            .ok_or_else(|| "Project not found. Select an existing project.".into())
+    }
+
+    fn project(&self, id: Option<&str>) -> Result<&SessionVault, String> {
+        match id.unwrap_or("default") {
+            "default" => Ok(self),
+            id => Ok(&self.projects[self.project_position(id)?].data),
+        }
+    }
+
+    fn update_project<T>(
+        &mut self,
+        id: Option<&str>,
+        change: impl FnOnce(&mut SessionVault) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if id.unwrap_or("default") == "default" {
+            return change(self);
+        }
+        let position = self.project_position(id.unwrap_or("default"))?;
+        let project = &mut self.projects[position];
+        // Allocate tokens across the Vault, but resolve identities only within the project.
+        project.data.counters = self.counters.clone();
+        let result = change(&mut project.data)?;
+        self.counters = project.data.counters.clone();
+        Ok(result)
+    }
+
+    fn create_project(&mut self, name: String) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 80 {
+            return Err("Enter a project name of 1–80 characters".into());
+        }
+        if self.projects.len() >= 100 {
+            return Err("The Vault supports up to 100 projects".into());
+        }
+        if name.eq_ignore_ascii_case("General")
+            || self
+                .projects
+                .iter()
+                .any(|p| p.name.to_lowercase() == name.to_lowercase())
+        {
+            return Err("A project with this name already exists".into());
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.project_index.take();
+        self.projects.push(VaultProject {
+            id: id.clone(),
+            name: name.into(),
+            data: SessionVault::default(),
+        });
+        Ok(id)
+    }
+    fn delete_project(&mut self, id: &str, confirmation: &str) -> Result<(), String> {
+        if id == "default" {
+            return Err("The General project cannot be deleted".into());
+        }
+        let position = self.project_position(id)?;
+        if confirmation != self.projects[position].name {
+            return Err("Type the project name exactly to confirm deletion".into());
+        }
+        self.projects.remove(position);
+        self.project_index.take();
+        // Vault-wide counters remain reserved after deleting a project.
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub fn list_projects(vault: State<'_, VaultState>) -> Result<Vec<ProjectSummary>, String> {
+    let state = vault.0.lock().map_err(|_| "The Vault is unavailable")?;
+    let data = &state.as_ref().ok_or("Unlock the Vault first")?.data;
+    let mut projects = vec![ProjectSummary {
+        id: "default".into(),
+        name: "General".into(),
+        documents: data.records.len(),
+        identities: data.pseudonyms.len(),
+    }];
+    projects.extend(data.projects.iter().map(|p| ProjectSummary {
+        id: p.id.clone(),
+        name: p.name.clone(),
+        documents: p.data.records.len(),
+        identities: p.data.pseudonyms.len(),
+    }));
+    Ok(projects)
+}
+
+#[tauri::command]
+pub fn create_project(name: String, vault: State<'_, VaultState>) -> Result<String, String> {
+    vault
+        .0
+        .lock()
+        .map_err(|_| "The Vault is unavailable")?
+        .as_mut()
+        .ok_or("Unlock the Vault first")?
+        .update(|data| data.create_project(name))
+}
+
+#[tauri::command]
+pub fn delete_project(
+    project_id: String,
+    confirmation: String,
+    vault: State<'_, VaultState>,
+) -> Result<(), String> {
+    vault
+        .0
+        .lock()
+        .map_err(|_| "The Vault is unavailable")?
+        .as_mut()
+        .ok_or("Unlock the Vault before deleting a project")?
+        .update(|data| data.delete_project(&project_id, &confirmation))
 }
 
 #[derive(Default)]
@@ -84,11 +229,21 @@ impl SessionVault {
         if original.is_empty() || original.len() > 10_000 {
             return Err("Enter an identity between 1 and 10,000 bytes".into());
         }
-        let key = identity_key(category, original);
-        if let Some(identity) = self.pseudonyms.iter().find(|identity| {
-            identity.entity_type == category && identity_key(category, &identity.original) == key
-        }) {
-            return Ok(identity.clone());
+        let key = (category.to_string(), identity_key(category, original));
+        let index = self.identity_index.get_or_init(|| {
+            let mut index = HashMap::new();
+            for (position, identity) in self.pseudonyms.iter().enumerate() {
+                index
+                    .entry((
+                        identity.entity_type.clone(),
+                        identity_key(&identity.entity_type, &identity.original),
+                    ))
+                    .or_insert(position);
+            }
+            index
+        });
+        if let Some(position) = index.get(&key) {
+            return Ok(self.pseudonyms[*position].clone());
         }
         let counter = self.counters.entry(category.into()).or_default();
         let pseudonym = loop {
@@ -104,6 +259,10 @@ impl SessionVault {
             original: original.into(),
             pseudonym,
         };
+        self.identity_index
+            .get_mut()
+            .expect("identity index initialized")
+            .insert(key, self.pseudonyms.len());
         self.pseudonyms.push(identity.clone());
         Ok(identity)
     }
@@ -155,6 +314,18 @@ impl SessionVault {
             original: (mode == "pseudonymize").then_some(text),
         });
         Ok(record)
+    }
+
+    fn delete_identity(&mut self, id: &str) -> Result<(), String> {
+        let index = self
+            .pseudonyms
+            .iter()
+            .position(|identity| identity.id == id)
+            .ok_or("Saved mapping not found in this project")?;
+        self.pseudonyms.remove(index);
+        self.identity_index.take();
+        // Keep counters monotonic: old document tokens must never be reassigned.
+        Ok(())
     }
 
     pub(crate) fn restore(&self, id: &str) -> Result<String, String> {
@@ -302,6 +473,7 @@ pub fn lock_vault(vault: State<'_, VaultState>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn process_reviewed_text(
+    project_id: Option<String>,
     text: String,
     detections: Vec<ReviewedEntity>,
     mode: String,
@@ -317,11 +489,18 @@ pub fn process_reviewed_text(
         .map_err(|_| "The vault is unavailable")?
         .as_mut()
         .ok_or("Unlock the Vault before processing")?
-        .update(|data| data.process(text, detections, &mode))
+        .update(|data| {
+            data.update_project(project_id.as_deref(), |project| {
+                project.process(text, detections, &mode)
+            })
+        })
 }
 
 #[tauri::command]
-pub fn list_vault_records(vault: State<'_, VaultState>) -> Result<Vec<ProcessedRecord>, String> {
+pub fn list_vault_records(
+    project_id: Option<String>,
+    vault: State<'_, VaultState>,
+) -> Result<Vec<ProcessedRecord>, String> {
     Ok(vault
         .0
         .lock()
@@ -329,6 +508,7 @@ pub fn list_vault_records(vault: State<'_, VaultState>) -> Result<Vec<ProcessedR
         .as_ref()
         .ok_or("Unlock the Vault to view records")?
         .data
+        .project(project_id.as_deref())?
         .records
         .iter()
         .rev()
@@ -337,7 +517,10 @@ pub fn list_vault_records(vault: State<'_, VaultState>) -> Result<Vec<ProcessedR
 }
 
 #[tauri::command]
-pub fn list_saved_identities(vault: State<'_, VaultState>) -> Result<Vec<SavedIdentity>, String> {
+pub fn list_saved_identities(
+    project_id: Option<String>,
+    vault: State<'_, VaultState>,
+) -> Result<Vec<SavedIdentity>, String> {
     Ok(vault
         .0
         .lock()
@@ -345,12 +528,14 @@ pub fn list_saved_identities(vault: State<'_, VaultState>) -> Result<Vec<SavedId
         .as_ref()
         .ok_or("Unlock the Vault to view identities")?
         .data
+        .project(project_id.as_deref())?
         .pseudonyms
         .clone())
 }
 
 #[tauri::command]
 pub fn save_identity(
+    project_id: Option<String>,
     original: String,
     entity_type: String,
     vault: State<'_, VaultState>,
@@ -361,7 +546,30 @@ pub fn save_identity(
         .map_err(|_| "The vault is unavailable")?
         .as_mut()
         .ok_or("Unlock the Vault before saving identities")?
-        .update(|data| data.save_identity(&entity_type, &original, ""))
+        .update(|data| {
+            data.update_project(project_id.as_deref(), |project| {
+                project.save_identity(&entity_type, &original, "")
+            })
+        })
+}
+
+#[tauri::command]
+pub fn delete_saved_identity(
+    project_id: Option<String>,
+    id: String,
+    vault: State<'_, VaultState>,
+) -> Result<(), String> {
+    vault
+        .0
+        .lock()
+        .map_err(|_| "The Vault is unavailable")?
+        .as_mut()
+        .ok_or("Unlock the Vault before deleting mappings")?
+        .update(|data| {
+            data.update_project(project_id.as_deref(), |project| {
+                project.delete_identity(&id)
+            })
+        })
 }
 
 pub(crate) fn find_matches(
@@ -398,6 +606,7 @@ pub(crate) fn find_matches(
 
 #[tauri::command]
 pub fn find_saved_identity(
+    project_id: Option<String>,
     id: String,
     text: String,
     vault: State<'_, VaultState>,
@@ -407,6 +616,7 @@ pub fn find_saved_identity(
         .as_ref()
         .ok_or("Unlock the Vault first")?
         .data
+        .project(project_id.as_deref())?
         .pseudonyms
         .iter()
         .find(|identity| identity.id == id)
@@ -415,7 +625,11 @@ pub fn find_saved_identity(
 }
 
 #[tauri::command]
-pub fn restore_vault_record(id: String, vault: State<'_, VaultState>) -> Result<String, String> {
+pub fn restore_vault_record(
+    project_id: Option<String>,
+    id: String,
+    vault: State<'_, VaultState>,
+) -> Result<String, String> {
     vault
         .0
         .lock()
@@ -423,11 +637,15 @@ pub fn restore_vault_record(id: String, vault: State<'_, VaultState>) -> Result<
         .as_ref()
         .ok_or("Unlock the Vault to restore records")?
         .data
+        .project(project_id.as_deref())?
         .restore(&id)
 }
 
 #[tauri::command]
-pub fn clear_vault_records(vault: State<'_, VaultState>) -> Result<(), String> {
+pub fn clear_vault_records(
+    project_id: Option<String>,
+    vault: State<'_, VaultState>,
+) -> Result<(), String> {
     vault
         .0
         .lock()
@@ -435,8 +653,10 @@ pub fn clear_vault_records(vault: State<'_, VaultState>) -> Result<(), String> {
         .as_mut()
         .ok_or("Unlock the Vault first")?
         .update(|data| {
-            data.records.clear();
-            Ok(())
+            data.update_project(project_id.as_deref(), |project| {
+                project.records.clear();
+                Ok(())
+            })
         })
 }
 
@@ -658,22 +878,30 @@ mod tests {
     #[test]
     fn invalid_overlap_stale_empty_and_mode_requests_do_not_change_vault() {
         let mut vault = SessionVault::default();
-        assert!(vault
-            .process(
-                "John".into(),
-                vec![entity("1", "John", 0), entity("2", "ohn", 1)],
-                "pseudonymize"
-            )
-            .is_err());
-        assert!(vault
-            .process("Jane".into(), vec![entity("1", "John", 0)], "pseudonymize")
-            .is_err());
-        assert!(vault
-            .process("John".into(), vec![], "pseudonymize")
-            .is_err());
-        assert!(vault
-            .process("John".into(), vec![entity("1", "John", 0)], "invalid")
-            .is_err());
+        assert!(
+            vault
+                .process(
+                    "John".into(),
+                    vec![entity("1", "John", 0), entity("2", "ohn", 1)],
+                    "pseudonymize"
+                )
+                .is_err()
+        );
+        assert!(
+            vault
+                .process("Jane".into(), vec![entity("1", "John", 0)], "pseudonymize")
+                .is_err()
+        );
+        assert!(
+            vault
+                .process("John".into(), vec![], "pseudonymize")
+                .is_err()
+        );
+        assert!(
+            vault
+                .process("John".into(), vec![entity("1", "John", 0)], "invalid")
+                .is_err()
+        );
         assert!(vault.records.is_empty());
         assert!(vault.pseudonyms.is_empty());
     }
@@ -788,6 +1016,7 @@ pub struct DetectionRule {
 
 #[tauri::command]
 pub fn save_detection_rules(
+    project_id: Option<String>,
     rules: Vec<DetectionRule>,
     vault: State<'_, VaultState>,
 ) -> Result<(), String> {
@@ -809,13 +1038,18 @@ pub fn save_detection_rules(
         .as_mut()
         .ok_or("Unlock the Vault before saving detection rules")?
         .update(|data| {
-            data.rules = rules;
-            Ok(())
+            data.update_project(project_id.as_deref(), |project| {
+                project.rules = rules;
+                Ok(())
+            })
         })
 }
 
 #[tauri::command]
-pub fn list_detection_rules(vault: State<'_, VaultState>) -> Result<Vec<DetectionRule>, String> {
+pub fn list_detection_rules(
+    project_id: Option<String>,
+    vault: State<'_, VaultState>,
+) -> Result<Vec<DetectionRule>, String> {
     Ok(vault
         .0
         .lock()
@@ -823,6 +1057,7 @@ pub fn list_detection_rules(vault: State<'_, VaultState>) -> Result<Vec<Detectio
         .as_ref()
         .ok_or("Unlock the Vault first")?
         .data
+        .project(project_id.as_deref())?
         .rules
         .clone())
 }
@@ -873,6 +1108,7 @@ impl DetectionOptions {
 
 #[tauri::command]
 pub async fn detect_with_rules(
+    project_id: Option<String>,
     text: String,
     entities: Vec<String>,
     options: Option<DetectionOptions>,
@@ -885,7 +1121,13 @@ pub async fn detect_with_rules(
         .lock()
         .map_err(|_| "The Vault is unavailable")?
         .as_ref()
-        .map(|opened| opened.data.rules.clone())
+        .map(|opened| {
+            opened
+                .data
+                .project(project_id.as_deref())
+                .map(|project| project.rules.clone())
+        })
+        .transpose()?
         .unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
         crate::run_detection_with_options(text, entities, rules, options)
@@ -999,9 +1241,321 @@ mod large_text_processing_tests {
             .unwrap();
         assert!(result.text.ends_with("PERSON_001"));
         assert_eq!(vault.restore(&result.id).unwrap(), source);
-        assert!(vault
-            .process("x".repeat(500_001), vec![], "anonymize")
-            .is_err());
+        assert!(
+            vault
+                .process("x".repeat(500_001), vec![], "anonymize")
+                .is_err()
+        );
         assert_eq!(vault.records.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+
+    fn process(data: &mut SessionVault, project: &str) -> ProcessedRecord {
+        data.update_project(Some(project), |scope| {
+            scope.process(
+                "Hiba Swaidan".into(),
+                vec![ReviewedEntity {
+                    id: "hit".into(),
+                    entity_type: "PERSON".into(),
+                    text: "Hiba Swaidan".into(),
+                    start: 0,
+                    end: 12,
+                }],
+                "pseudonymize",
+            )
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn projects_reuse_only_their_own_identities_and_keep_unique_tokens() {
+        let mut data = SessionVault::default();
+        let general = process(&mut data, "default");
+        let first = data.create_project("Case A".into()).unwrap();
+        let second = data.create_project("Case B".into()).unwrap();
+        let a = process(&mut data, &first);
+        let b = process(&mut data, &second);
+        assert_eq!(a.text, process(&mut data, &first).text);
+        assert_ne!(a.text, b.text);
+        assert_ne!(general.text, a.text);
+        assert_eq!(general.text, process(&mut data, "default").text);
+        assert_eq!(data.project(Some(&first)).unwrap().pseudonyms.len(), 1);
+        assert!(data.project(Some(&second)).unwrap().restore(&a.id).is_err());
+        assert_eq!(
+            data.project(Some(&first)).unwrap().restore(&a.id).unwrap(),
+            "Hiba Swaidan"
+        );
+        let saved = serde_json::to_vec(&data).unwrap();
+        let mut reopened: SessionVault = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(a.text, process(&mut reopened, &first).text);
+        assert_eq!(b.text, process(&mut reopened, &second).text);
+        assert!(reopened.project(Some("missing")).is_err());
+    }
+
+    #[test]
+    fn projects_survive_encrypted_reopen_and_history_clear_is_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("projects.vault");
+        let password = "project test passphrase";
+        let mut vault = UnlockedVault::open(path.clone(), password, true).unwrap();
+        let (a, b) = vault
+            .update(|data| {
+                Ok((
+                    data.create_project("Case A".into())?,
+                    data.create_project("Case B".into())?,
+                ))
+            })
+            .unwrap();
+        let first = vault.update(|data| Ok(process(data, &a))).unwrap();
+        let second = vault.update(|data| Ok(process(data, &b))).unwrap();
+        let encrypted = std::fs::read_to_string(&path).unwrap();
+        assert!(!encrypted.contains("Hiba"));
+        assert!(!encrypted.contains("Case A"));
+        drop(vault);
+        let mut reopened = UnlockedVault::open(path, password, false).unwrap();
+        assert_eq!(
+            first.text,
+            reopened.update(|data| Ok(process(data, &a))).unwrap().text
+        );
+        reopened
+            .update(|data| {
+                data.update_project(Some(&a), |scope| {
+                    scope.records.clear();
+                    Ok(())
+                })
+            })
+            .unwrap();
+        assert!(reopened.data.project(Some(&a)).unwrap().records.is_empty());
+        assert_eq!(reopened.data.project(Some(&a)).unwrap().pseudonyms.len(), 1);
+        assert_eq!(
+            reopened
+                .data
+                .project(Some(&b))
+                .unwrap()
+                .restore(&second.id)
+                .unwrap(),
+            "Hiba Swaidan"
+        );
+        assert_eq!(
+            first.text,
+            reopened.update(|data| Ok(process(data, &a))).unwrap().text
+        );
+    }
+
+    #[test]
+    fn deleting_mapping_is_project_scoped_persisted_and_never_reuses_tokens() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("deletion.vault");
+        let password = "mapping deletion passphrase";
+        let mut vault = UnlockedVault::open(path.clone(), password, true).unwrap();
+        let a = vault
+            .update(|data| data.create_project("Project A".into()))
+            .unwrap();
+        let b = vault
+            .update(|data| data.create_project("Project B".into()))
+            .unwrap();
+        let first = vault.update(|data| Ok(process(data, &a))).unwrap();
+        let other = vault.update(|data| Ok(process(data, &b))).unwrap();
+        let identity = vault.data.project(Some(&a)).unwrap().pseudonyms[0]
+            .id
+            .clone();
+        let before = serde_json::to_value(&vault.data).unwrap();
+        assert!(
+            vault
+                .update(|data| data
+                    .update_project(Some(&b), |project| project.delete_identity(&identity)))
+                .is_err()
+        );
+        assert_eq!(before, serde_json::to_value(&vault.data).unwrap());
+        vault
+            .update(|data| {
+                data.update_project(Some(&a), |project| project.delete_identity(&identity))
+            })
+            .unwrap();
+        drop(vault);
+        let mut reopened = UnlockedVault::open(path, password, false).unwrap();
+        assert!(
+            reopened
+                .data
+                .project(Some(&a))
+                .unwrap()
+                .pseudonyms
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .data
+                .project(Some(&a))
+                .unwrap()
+                .restore(&first.id)
+                .unwrap(),
+            "Hiba Swaidan"
+        );
+        assert_eq!(
+            other.text,
+            reopened.update(|data| Ok(process(data, &b))).unwrap().text
+        );
+        let fresh = reopened.update(|data| Ok(process(data, &a))).unwrap();
+        assert_ne!(fresh.text, first.text);
+        assert_ne!(fresh.text, other.text);
+        assert!(
+            reopened
+                .update(|data| data
+                    .update_project(Some(&a), |project| project.delete_identity(&identity)))
+                .is_err()
+        );
+        let general = reopened
+            .update(|data| data.save_identity("PERSON", "John Smith", ""))
+            .unwrap();
+        reopened
+            .update(|data| {
+                data.update_project(None, |project| project.delete_identity(&general.id))
+            })
+            .unwrap();
+        let new_general = reopened
+            .update(|data| data.save_identity("PERSON", "John Smith", ""))
+            .unwrap();
+        assert_ne!(general.pseudonym, new_general.pseudonym);
+    }
+
+    #[test]
+    fn normalized_lookup_keeps_abbreviations_and_categories_separate_after_reopen() {
+        let mut data = SessionVault::default();
+        let a = data.create_project("A".into()).unwrap();
+        let b = data.create_project("B".into()).unwrap();
+        let mut save = |project: &str, category: &str, value: &str| {
+            data.update_project(Some(project), |scope| {
+                scope.save_identity(category, value, "")
+            })
+            .unwrap()
+        };
+        let original = save(&a, "PERSON", "Hiba Swaidan");
+        for name in ["hiba swaidan", "HIBA SWAIDAN", " Hiba   Swaidan "] {
+            assert_eq!(save(&a, "PERSON", name).id, original.id);
+        }
+        for name in ["Hiba", "H. Swaidan"] {
+            assert_ne!(save(&a, "PERSON", name).id, original.id);
+        }
+        assert_ne!(save(&a, "ORGANIZATION", "Hiba Swaidan").id, original.id);
+        assert_ne!(
+            save(&b, "PERSON", "Hiba Swaidan").pseudonym,
+            original.pseudonym
+        );
+        let encoded = serde_json::to_string(&data).unwrap();
+        assert!(!encoded.contains("identity_index"));
+        assert!(!encoded.contains("project_index"));
+        let mut reopened: SessionVault = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            reopened
+                .update_project(Some(&a), |scope| scope.save_identity(
+                    "PERSON",
+                    "HIBA SWAIDAN",
+                    ""
+                ))
+                .unwrap()
+                .id,
+            original.id
+        );
+        // Removing a middle entry must not leave cached vector positions stale.
+        reopened
+            .update_project(Some(&a), |scope| scope.delete_identity(&original.id))
+            .unwrap();
+        let short = reopened
+            .update_project(Some(&a), |scope| scope.save_identity("PERSON", "Hiba", ""))
+            .unwrap();
+        assert_eq!(short.original, "Hiba");
+        assert_eq!(reopened.project(Some(&a)).unwrap().pseudonyms.len(), 3);
+    }
+
+    #[test]
+    fn project_deletion_requires_confirmation_persists_and_reserves_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("project-delete.vault");
+        let password = "project deletion test password";
+        let mut vault = UnlockedVault::open(path.clone(), password, true).unwrap();
+        let a = vault
+            .update(|data| data.create_project("Case A".into()))
+            .unwrap();
+        let b = vault
+            .update(|data| data.create_project("Case B".into()))
+            .unwrap();
+        let first = vault.update(|data| Ok(process(data, &a))).unwrap();
+        let other = vault.update(|data| Ok(process(data, &b))).unwrap();
+        let before = serde_json::to_value(&vault.data).unwrap();
+        assert!(
+            vault
+                .update(|data| data.delete_project(&a, "wrong"))
+                .is_err()
+        );
+        assert!(
+            vault
+                .update(|data| data.delete_project("default", "General"))
+                .is_err()
+        );
+        assert_eq!(before, serde_json::to_value(&vault.data).unwrap());
+        vault
+            .update(|data| data.delete_project(&a, "Case A"))
+            .unwrap();
+        drop(vault);
+        let mut reopened = UnlockedVault::open(path, password, false).unwrap();
+        assert!(reopened.data.project(Some(&a)).is_err());
+        assert_eq!(
+            reopened
+                .data
+                .project(Some(&b))
+                .unwrap()
+                .restore(&other.id)
+                .unwrap(),
+            "Hiba Swaidan"
+        );
+        let c = reopened
+            .update(|data| data.create_project("Case A".into()))
+            .unwrap();
+        assert_ne!(c, a);
+        let fresh = reopened.update(|data| Ok(process(data, &c))).unwrap();
+        assert_ne!(fresh.text, first.text);
+        assert_ne!(fresh.text, other.text);
+        assert!(
+            reopened
+                .update(|data| data.delete_project(&a, "Case A"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_vaults_keep_mappings_in_general_and_names_are_validated() {
+        let mut legacy = SessionVault::default();
+        let old = process(&mut legacy, "default");
+        let mut json = serde_json::to_value(&legacy).unwrap();
+        json.as_object_mut().unwrap().remove("projects");
+        let mut upgraded: SessionVault = serde_json::from_value(json).unwrap();
+        assert_eq!(old.text, process(&mut upgraded, "default").text);
+        assert!(upgraded.create_project(" ".into()).is_err());
+        assert!(upgraded.create_project("General".into()).is_err());
+        upgraded.create_project("Case".into()).unwrap();
+        assert!(upgraded.create_project(" case ".into()).is_err());
+        let before = serde_json::to_value(&upgraded).unwrap();
+        let output = upgraded
+            .project(Some("default"))
+            .unwrap()
+            .clone()
+            .process(
+                "Hiba".into(),
+                vec![ReviewedEntity {
+                    id: "1".into(),
+                    entity_type: "PERSON".into(),
+                    text: "Hiba".into(),
+                    start: 0,
+                    end: 4,
+                }],
+                "anonymize",
+            )
+            .unwrap();
+        assert_eq!(output.text, "PERSON_001");
+        assert_eq!(before, serde_json::to_value(&upgraded).unwrap());
     }
 }
