@@ -13,6 +13,22 @@ pub struct ProcessedRecord {
     mode: String,
     pub(crate) text: String,
     count: usize,
+    #[serde(skip)]
+    pub(crate) export_replacements: Vec<crate::docx::Replacement>,
+}
+
+#[derive(Serialize)]
+pub struct ProcessedResponse {
+    #[serde(flatten)]
+    record: ProcessedRecord,
+    replacements: Vec<crate::docx::Replacement>,
+}
+
+impl From<ProcessedRecord> for ProcessedResponse {
+    fn from(mut record: ProcessedRecord) -> Self {
+        let replacements = std::mem::take(&mut record.export_replacements);
+        Self { record, replacements }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -287,16 +303,21 @@ impl SessionVault {
         let mut output = String::new();
         let mut cursor = 0;
         let mut temporary_identities = SessionVault::default();
+        let mut export_replacements = Vec::with_capacity(approved.len());
         for entity in &approved {
             output.extend(chars[cursor..entity.start].iter());
-            if mode == "anonymize" {
-                let identity =
-                    temporary_identities.save_identity(&entity.entity_type, &entity.text, &text)?;
-                output.push_str(&identity.pseudonym);
+            let identity = if mode == "anonymize" {
+                temporary_identities.save_identity(&entity.entity_type, &entity.text, &text)?
             } else {
-                let identity = self.save_identity(&entity.entity_type, &entity.text, &text)?;
-                output.push_str(&identity.pseudonym);
-            }
+                self.save_identity(&entity.entity_type, &entity.text, &text)?
+            };
+            output.push_str(&identity.pseudonym);
+            export_replacements.push(crate::docx::Replacement {
+                start: entity.start,
+                end: entity.end,
+                text: entity.text.clone(),
+                replacement: identity.pseudonym,
+            });
             cursor = entity.end;
         }
         output.extend(chars[cursor..].iter());
@@ -305,12 +326,13 @@ impl SessionVault {
             mode: mode.into(),
             text: output,
             count: approved.len(),
+            export_replacements,
         };
         if mode == "anonymize" {
             return Ok(record);
         }
         self.records.push(StoredRecord {
-            public: record.clone(),
+            public: ProcessedRecord { export_replacements: Vec::new(), ..record.clone() },
             original: (mode == "pseudonymize").then_some(text),
         });
         Ok(record)
@@ -478,10 +500,10 @@ pub fn process_reviewed_text(
     detections: Vec<ReviewedEntity>,
     mode: String,
     vault: State<'_, VaultState>,
-) -> Result<ProcessedRecord, String> {
+) -> Result<ProcessedResponse, String> {
     // Anonymization is transient: never open, read, or update the persistent Vault.
     if mode == "anonymize" {
-        return SessionVault::default().process(text, detections, &mode);
+        return SessionVault::default().process(text, detections, &mode).map(ProcessedResponse::from);
     }
     vault
         .0
@@ -494,6 +516,7 @@ pub fn process_reviewed_text(
                 project.process(text, detections, &mode)
             })
         })
+        .map(ProcessedResponse::from)
 }
 
 #[tauri::command]
@@ -751,6 +774,25 @@ mod tests {
             text: value.into(),
             start,
             end: start + value.chars().count(),
+        }
+    }
+
+    #[test]
+    fn processing_returns_exact_transient_replacements_in_both_modes() {
+        for mode in ["anonymize", "pseudonymize"] {
+            let mut vault = SessionVault::default();
+            let record = vault.process(
+                "😀 John met John".into(), vec![entity("second", "John", 11)], mode,
+            ).unwrap();
+            let response = ProcessedResponse::from(record);
+            assert_eq!(response.replacements.len(), 1);
+            assert_eq!(response.replacements[0].start, 11);
+            assert_eq!(response.replacements[0].text, "John");
+            assert_eq!(response.replacements[0].replacement, "PERSON_001");
+            assert_eq!(response.record.text, "😀 John met PERSON_001");
+            if mode == "pseudonymize" {
+                assert!(vault.records[0].public.export_replacements.is_empty());
+            }
         }
     }
 

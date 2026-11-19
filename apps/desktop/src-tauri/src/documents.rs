@@ -16,7 +16,7 @@ pub struct DocumentError {
     message: String,
 }
 impl DocumentError {
-    fn new(code: &str, message: &str) -> Self {
+    pub(crate) fn new(code: &str, message: &str) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -26,11 +26,13 @@ impl DocumentError {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ParsedDocument {
-    text: String,
+    pub(crate) text: String,
     file_name: String,
     file_type: String,
     pages: Option<u32>,
     warnings: Vec<String>,
+    #[serde(default)]
+    pub(crate) source_id: Option<String>,
 }
 
 fn requested_file_limit(max_file_mb: Option<u64>) -> Result<u64, DocumentError> {
@@ -216,12 +218,43 @@ fn parse_path_with_limit(
     Ok(document)
 }
 
+// Snapshot DOCX bytes before parsing so later file edits cannot change the export.
+pub(crate) fn import_path_with_limit(
+    path: &Path,
+    max_file_bytes: u64,
+    source_state: &crate::docx::DocxState,
+) -> Result<ParsedDocument, DocumentError> {
+    validate_file_with_limit(path, max_file_bytes)?;
+    if !path.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("docx")) {
+        let document = parse_path_with_limit(path, max_file_bytes)?;
+        source_state.clear(None).map_err(|message| DocumentError::new("source_unavailable", &message))?;
+        return Ok(document);
+    }
+    let mut bytes = Vec::new();
+    File::open(path).and_then(|file| file.take(max_file_bytes + 1).read_to_end(&mut bytes))
+        .map_err(|_| DocumentError::new("unreadable_file", "Unable to read the original Word document."))?;
+    if bytes.len() as u64 > max_file_bytes {
+        return Err(DocumentError::new("file_too_large", "The document exceeds the selected import limit."));
+    }
+    let mut snapshot = tempfile::Builder::new().suffix(".docx").tempfile()
+        .map_err(|_| DocumentError::new("unreadable_file", "Unable to prepare the Word document for import."))?;
+    snapshot.write_all(&bytes).and_then(|_| snapshot.as_file().sync_all())
+        .map_err(|_| DocumentError::new("unreadable_file", "Unable to prepare the Word document for import."))?;
+    let mut document = parse_path_with_limit(snapshot.path(), max_file_bytes)?;
+    document.file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("document.docx").into();
+    document.source_id = Some(source_state.remember(bytes, document.text.clone())
+        .map_err(|message| DocumentError::new("source_unavailable", &message))?);
+    Ok(document)
+}
+
 // Paths originate in the native picker, never arbitrary paths supplied by web content.
 #[tauri::command]
 pub async fn parse_document(
     app: tauri::AppHandle,
     max_file_mb: Option<u64>,
+    source_state: tauri::State<'_, crate::docx::DocxState>,
 ) -> Result<Option<ParsedDocument>, DocumentError> {
+    let source_state = source_state.inner().clone();
     let max_file_bytes = requested_file_limit(max_file_mb)?;
     tauri::async_runtime::spawn_blocking(move || {
         let selected = app
@@ -235,7 +268,7 @@ pub async fn parse_document(
         let path = selected
             .into_path()
             .map_err(|_| DocumentError::new("invalid_path", "Select a local document file."))?;
-        parse_path_with_limit(&path, max_file_bytes).map(Some)
+        import_path_with_limit(&path, max_file_bytes, &source_state).map(Some)
     })
     .await
     .map_err(|_| {
@@ -366,11 +399,13 @@ pub async fn parse_dropped_document(
     path: String,
     max_file_mb: Option<u64>,
     dropped: tauri::State<'_, DroppedDocuments>,
+    source_state: tauri::State<'_, crate::docx::DocxState>,
 ) -> Result<ParsedDocument, DocumentError> {
     let path = std::path::PathBuf::from(path);
     dropped.consume(&path)?;
+    let source_state = source_state.inner().clone();
     let max_file_bytes = requested_file_limit(max_file_mb)?;
-    tauri::async_runtime::spawn_blocking(move || parse_path_with_limit(&path, max_file_bytes))
+    tauri::async_runtime::spawn_blocking(move || import_path_with_limit(&path, max_file_bytes, &source_state))
         .await
         .map_err(|_| {
             DocumentError::new(
