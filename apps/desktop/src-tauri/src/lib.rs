@@ -1,6 +1,7 @@
 use tauri::Manager;
 mod account_key;
 mod documents;
+mod docx;
 #[cfg(test)]
 mod identity_tests;
 mod os_auth;
@@ -160,6 +161,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(protection::VaultState::default())
         .manage(documents::DroppedDocuments::default())
+        .manage(docx::DocxState::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 window
@@ -190,6 +192,8 @@ pub fn run() {
             protection::restore_vault_record,
             protection::clear_vault_records,
             protection::export_processed_text,
+            docx::export_processed_docx,
+            docx::clear_docx_source,
             documents::parse_document,
             documents::parse_dropped_document,
             review::validate_reviewed_detections

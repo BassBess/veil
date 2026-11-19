@@ -44,36 +44,8 @@ def _txt(path):
 
 def _docx(path):
     from docx import Document
-    from docx.table import Table
-    def blocks(container):
-        for block in container.iter_inner_content():
-            if isinstance(block, Table):
-                for row in block.rows:
-                    # Preserve nested paragraph/table order inside each cell.
-                    yield " | ".join(_join(blocks(cell)) for cell in row.cells)
-            else:
-                yield block.text
-    document = Document(path)
-
-    def section_content(kind):
-        # Linked sections share XML parts, so extract each part only once.
-        seen = set()
-        for section in document.sections:
-            for variant in ("", "first_page_", "even_page_"):
-                container = getattr(section, variant + kind)
-                if container.is_linked_to_previous:
-                    continue
-                part_name = str(container.part.partname)
-                if part_name in seen:
-                    continue
-                seen.add(part_name)
-                yield from blocks(container)
-
-    return _join([
-        *section_content("header"),
-        *blocks(document),
-        *section_content("footer"),
-    ]), None, []
+    from veil_engine.docx_export import extract_docx
+    return extract_docx(Document(path)).text, None, []
 
 
 def _pdf(path):

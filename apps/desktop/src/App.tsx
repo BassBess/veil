@@ -10,7 +10,8 @@ type VaultStatus = { exists: boolean; unlocked: boolean; account_supported: bool
 type Project = { id: string; name: string; documents: number; identities: number };
 type DetectionRule = { phrase: string; entity_type: string };
 type SavedIdentity = { id: string; entity_type: string; original: string; pseudonym: string };
-type ProcessedRecord = { id: string; mode: string; text: string; count: number };
+type DocxReplacement = { start: number; end: number; text: string; replacement: string };
+type ProcessedRecord = { id: string; mode: string; text: string; count: number; replacements?: DocxReplacement[] };
 type Detection = {
   entity_type: string;
   text: string;
@@ -44,6 +45,7 @@ type ParsedDocument = {
   file_type: string;
   pages: number | null;
   warnings: string[];
+  source_id?: string | null;
 };
 
 function importErrorMessage(error: unknown): string {
@@ -179,6 +181,12 @@ function App() {
   const [reviewError, setReviewError] = useState("");
   const [documentEdited, setDocumentEdited] = useState(false);
   const [importedDocument, setImportedDocument] = useState<ParsedDocument | null>(null);
+  useEffect(() => {
+    const sourceId = importedDocument?.source_id;
+    return () => {
+      if (sourceId) void invoke("clear_docx_source", { sourceId }).catch(() => undefined);
+    };
+  }, [importedDocument?.source_id]);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState("");
 
@@ -467,6 +475,27 @@ function App() {
       const saved = await invoke<boolean>("export_processed_text", { text: value, format });
       setExportMessage(saved ? "Text file saved." : "");
     } catch (error) { setExportMessage(String(error)); }
+  }
+
+  async function exportDocx() {
+    if (!processed || !importedDocument?.source_id || loading) return;
+    const document = importedDocument;
+    const result = processed.record;
+    setLoading(true);
+    setExportMessage("");
+    try {
+      const saved = await invoke<boolean>("export_processed_docx", {
+        sourceId: document.source_id,
+        originalText: document.text,
+        processedText: result.text,
+        replacements: result.replacements ?? [],
+      });
+      setExportMessage(saved ? "Word document saved." : "");
+    } catch (error) {
+      setExportMessage(String(error));
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function restoreRecord(id: string) {
@@ -1210,6 +1239,13 @@ function App() {
             <textarea readOnly dir="auto" aria-label="Processed text" value={processed.record.text} />
             <button className="primary" onClick={() => exportText(processed.record.text)}><Icon name="document" />Export TXT</button>
             <button className="secondary-button" onClick={() => exportText(processed.record.text, "pdf")}><Icon name="document" />Export PDF</button>
+            {importedDocument?.file_type === "docx" && <>
+              <button className="secondary-button" disabled={loading || !importedDocument.source_id || text !== importedDocument.text} onClick={() => void exportDocx()}><Icon name="document" />Export DOCX</button>
+              <p>{text !== importedDocument.text
+                ? "Import and process the original Word document again to export its formatting after text edits."
+                : "DOCX export preserves the original document formatting. Replacement length may change line breaks and page layout."}</p>
+              <p>DOCX export replaces reviewed text in paragraphs, tables, headers, and footers. Images, comments, tracked changes, text boxes, metadata, and embedded files are not inspected or sanitized. Links on replaced text are removed.</p>
+            </>}
             <p>PDF export creates a new text-layout PDF from this processed preview.</p>
             {exportMessage && <p role="status">{exportMessage}</p>}
           </section>}
