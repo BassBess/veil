@@ -1,8 +1,12 @@
-use crate::review::{ReviewedEntity, validate_reviewed_detections};
+use crate::review::ReviewedEntity;
+use crate::database::{self, Mode};
+#[cfg(test)]
 use crate::vault_storage::UnlockedVault;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::OnceLock;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use zeroize::Zeroizing;
@@ -10,9 +14,9 @@ use zeroize::Zeroizing;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProcessedRecord {
     pub(crate) id: String,
-    mode: String,
+    pub(crate) mode: String,
     pub(crate) text: String,
-    count: usize,
+    pub(crate) count: usize,
     #[serde(skip)]
     pub(crate) export_replacements: Vec<crate::docx::Replacement>,
 }
@@ -27,55 +31,61 @@ pub struct ProcessedResponse {
 impl From<ProcessedRecord> for ProcessedResponse {
     fn from(mut record: ProcessedRecord) -> Self {
         let replacements = std::mem::take(&mut record.export_replacements);
-        Self { record, replacements }
+        Self {
+            record,
+            replacements,
+        }
     }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct StoredRecord {
-    public: ProcessedRecord,
-    original: Option<String>,
+    pub(crate) public: ProcessedRecord,
+    pub(crate) original: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SavedIdentity {
     pub(crate) id: String,
-    entity_type: String,
-    original: String,
+    pub(crate) entity_type: String,
+    pub(crate) original: String,
     pub(crate) pseudonym: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SessionVault {
+    #[cfg(test)]
     #[serde(skip)]
     project_index: OnceLock<HashMap<String, usize>>,
+    #[cfg(test)]
     #[serde(skip)]
     identity_index: OnceLock<HashMap<(String, String), usize>>,
     #[serde(default)]
-    projects: Vec<VaultProject>,
+    pub(crate) projects: Vec<VaultProject>,
     pub(crate) records: Vec<StoredRecord>,
     pub(crate) pseudonyms: Vec<SavedIdentity>,
     #[serde(default)]
-    counters: HashMap<String, usize>,
+    pub(crate) counters: HashMap<String, usize>,
     #[serde(default)]
     pub(crate) rules: Vec<DetectionRule>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct VaultProject {
-    id: String,
-    name: String,
-    data: SessionVault,
+pub(crate) struct VaultProject {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) data: SessionVault,
 }
 
 #[derive(Serialize)]
 pub struct ProjectSummary {
-    id: String,
-    name: String,
-    documents: usize,
-    identities: usize,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) documents: usize,
+    pub(crate) identities: usize,
 }
 
+#[cfg(test)]
 impl SessionVault {
     fn project_position(&self, id: &str) -> Result<usize, String> {
         self.project_index
@@ -98,7 +108,7 @@ impl SessionVault {
         }
     }
 
-    fn update_project<T>(
+    pub(crate) fn update_project<T>(
         &mut self,
         id: Option<&str>,
         change: impl FnOnce(&mut SessionVault) -> Result<T, String>,
@@ -115,7 +125,7 @@ impl SessionVault {
         Ok(result)
     }
 
-    fn create_project(&mut self, name: String) -> Result<String, String> {
+    pub(crate) fn create_project(&mut self, name: String) -> Result<String, String> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 80 {
             return Err("Enter a project name of 1–80 characters".into());
@@ -140,7 +150,7 @@ impl SessionVault {
         });
         Ok(id)
     }
-    fn delete_project(&mut self, id: &str, confirmation: &str) -> Result<(), String> {
+    pub(crate) fn delete_project(&mut self, id: &str, confirmation: &str) -> Result<(), String> {
         if id == "default" {
             return Err("The General project cannot be deleted".into());
         }
@@ -155,34 +165,71 @@ impl SessionVault {
     }
 }
 
+#[derive(Default)]
+pub struct VaultState(Mutex<VaultSession>);
+
+#[derive(Default)]
+struct VaultSession {
+    opened: Option<database::Vault>,
+    checked_auto_open: bool,
+    epoch: u64,
+}
+
+impl VaultSession {
+    fn advance(&mut self) -> Result<(), String> {
+        self.epoch = self
+            .epoch
+            .checked_add(1)
+            .ok_or("Vault session generation exhausted")?;
+        Ok(())
+    }
+
+    fn verify_epoch(&self, expected: u64) -> Result<(), String> {
+        if self.epoch != expected {
+            return Err("The Vault session changed. Start the action again.".into());
+        }
+        Ok(())
+    }
+}
+
+impl VaultState {
+    fn enter(&self) -> Result<std::sync::MutexGuard<'_, VaultSession>, String> {
+        self.0.lock().map_err(|_| "The Vault is unavailable".into())
+    }
+
+    fn read<T>(
+        &self,
+        read: impl FnOnce(&database::Vault) -> Result<T, String>,
+    ) -> Result<T, String> {
+        read(
+            self.enter()?
+                .opened
+                .as_ref()
+                .ok_or("Unlock the Vault first")?,
+        )
+    }
+
+    fn write<T>(
+        &self,
+        change: impl FnOnce(&mut database::Vault) -> Result<T, String>,
+    ) -> Result<T, String> {
+        change(
+            self.enter()?
+                .opened
+                .as_mut()
+                .ok_or("Unlock the Vault first")?,
+        )
+    }
+}
+
 #[tauri::command]
 pub fn list_projects(vault: State<'_, VaultState>) -> Result<Vec<ProjectSummary>, String> {
-    let state = vault.0.lock().map_err(|_| "The Vault is unavailable")?;
-    let data = &state.as_ref().ok_or("Unlock the Vault first")?.data;
-    let mut projects = vec![ProjectSummary {
-        id: "default".into(),
-        name: "General".into(),
-        documents: data.records.len(),
-        identities: data.pseudonyms.len(),
-    }];
-    projects.extend(data.projects.iter().map(|p| ProjectSummary {
-        id: p.id.clone(),
-        name: p.name.clone(),
-        documents: p.data.records.len(),
-        identities: p.data.pseudonyms.len(),
-    }));
-    Ok(projects)
+    vault.read(|opened| opened.repo.projects())
 }
 
 #[tauri::command]
 pub fn create_project(name: String, vault: State<'_, VaultState>) -> Result<String, String> {
-    vault
-        .0
-        .lock()
-        .map_err(|_| "The Vault is unavailable")?
-        .as_mut()
-        .ok_or("Unlock the Vault first")?
-        .update(|data| data.create_project(name))
+    vault.write(|opened| opened.repo.create_project(name))
 }
 
 #[tauri::command]
@@ -191,22 +238,10 @@ pub fn delete_project(
     confirmation: String,
     vault: State<'_, VaultState>,
 ) -> Result<(), String> {
-    vault
-        .0
-        .lock()
-        .map_err(|_| "The Vault is unavailable")?
-        .as_mut()
-        .ok_or("Unlock the Vault before deleting a project")?
-        .update(|data| data.delete_project(&project_id, &confirmation))
+    vault.write(|opened| opened.repo.delete_project(&project_id, &confirmation))
 }
 
-#[derive(Default)]
-pub struct VaultState(
-    pub Mutex<Option<UnlockedVault>>,
-    pub std::sync::atomic::AtomicBool,
-);
-
-fn identity_key(category: &str, value: &str) -> String {
+pub(crate) fn identity_key(category: &str, value: &str) -> String {
     match category {
         "PERSON" | "LOCATION" | "ORGANIZATION" => value
             .split_whitespace()
@@ -217,6 +252,140 @@ fn identity_key(category: &str, value: &str) -> String {
     }
 }
 
+pub(crate) const CATEGORY_PREFIXES: &[(&str, &str)] = &[
+    ("PERSON", "PERSON"),
+    ("EMAIL_ADDRESS", "EMAIL"),
+    ("PHONE_NUMBER", "PHONE"),
+    ("LOCATION", "LOCATION"),
+    ("ORGANIZATION", "ORG"),
+    ("STREET_ADDRESS", "ADDRESS"),
+    ("POSTAL_CODE", "POSTCODE"),
+    ("DATE_TIME", "DATE"),
+    ("CREDIT_CARD", "CARD"),
+    ("IBAN_CODE", "IBAN"),
+    ("IP_ADDRESS", "IP"),
+    ("URL", "URL"),
+    ("ID_NUMBER", "ID"),
+    ("INDIRECT_IDENTIFIER", "DETAIL"),
+];
+
+pub(crate) fn category_prefix(category: &str) -> Option<&'static str> {
+    CATEGORY_PREFIXES
+        .iter()
+        .find(|(code, _)| *code == category)
+        .map(|(_, prefix)| *prefix)
+}
+
+pub(crate) fn project_name_key(name: &str) -> Result<String, String> {
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err("Enter a project name of 1–80 characters".into());
+    }
+    if name.eq_ignore_ascii_case("General") {
+        return Err("A project with this name already exists".into());
+    }
+    Ok(name.to_lowercase())
+}
+
+pub(crate) fn mapping_value<'a>(
+    category: &str,
+    value: &'a str,
+) -> Result<(&'a str, String), String> {
+    if category_prefix(category).is_none() {
+        return Err("Unsupported identity category".into());
+    }
+    let original = value.trim();
+    if original.is_empty() || original.len() > 10_000 {
+        return Err("Enter an identity between 1 and 10,000 bytes".into());
+    }
+    Ok((original, identity_key(category, original)))
+}
+
+pub(crate) fn next_token(
+    mut counter: i64,
+    prefix: &str,
+    source: &str,
+) -> Result<(i64, String), String> {
+    loop {
+        counter = counter
+            .checked_add(1)
+            .ok_or("Pseudonym counter is exhausted")?;
+        let candidate = format!("{prefix}_{counter:03}");
+        if !source.contains(&candidate) {
+            return Ok((counter, candidate));
+        }
+    }
+}
+
+#[derive(Default)]
+struct TemporaryMappings {
+    tokens: HashMap<(String, String), String>,
+    counters: HashMap<String, i64>,
+}
+
+impl TemporaryMappings {
+    fn token(&mut self, entity: &ReviewedEntity, source: &str) -> Result<String, String> {
+        let (_, value) = mapping_value(&entity.entity_type, &entity.text)?;
+        let key = (entity.entity_type.clone(), value);
+        if let Some(token) = self.tokens.get(&key) {
+            return Ok(token.clone());
+        }
+        let prefix = category_prefix(&entity.entity_type).ok_or("Unsupported identity category")?;
+        let counter = self.counters.entry(entity.entity_type.clone()).or_default();
+        let (next, token) = next_token(*counter, prefix, source)?;
+        *counter = next;
+        self.tokens.insert(key, token.clone());
+        Ok(token)
+    }
+}
+
+pub(crate) fn approved_detections(
+    text: &str,
+    detections: Vec<ReviewedEntity>,
+    mode: &str,
+) -> Result<Vec<ReviewedEntity>, String> {
+    if !matches!(mode, "anonymize" | "pseudonymize") {
+        return Err("Choose a valid processing mode".into());
+    }
+    let approved = crate::review::validate_spans(text, detections)?;
+    if approved.is_empty() {
+        return Err("Accept at least one detection before processing".into());
+    }
+    Ok(approved)
+}
+
+pub(crate) fn render_processed(
+    text: &str,
+    approved: &[ReviewedEntity],
+    mode: &str,
+    mut replacement: impl FnMut(&ReviewedEntity) -> Result<String, String>,
+) -> Result<ProcessedRecord, String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut output = String::new();
+    let mut cursor = 0;
+    let mut export_replacements = Vec::with_capacity(approved.len());
+    for entity in approved {
+        output.extend(chars[cursor..entity.start].iter());
+        let token = replacement(entity)?;
+        output.push_str(&token);
+        export_replacements.push(crate::docx::Replacement {
+            start: entity.start,
+            end: entity.end,
+            text: entity.text.clone(),
+            replacement: token,
+        });
+        cursor = entity.end;
+    }
+    output.extend(chars[cursor..].iter());
+    Ok(ProcessedRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        mode: mode.into(),
+        text: output,
+        count: approved.len(),
+        export_replacements,
+    })
+}
+
+#[cfg(test)]
 impl SessionVault {
     pub(crate) fn save_identity(
         &mut self,
@@ -224,28 +393,9 @@ impl SessionVault {
         original: &str,
         source: &str,
     ) -> Result<SavedIdentity, String> {
-        let prefix = match category {
-            "PERSON" => "PERSON",
-            "EMAIL_ADDRESS" => "EMAIL",
-            "PHONE_NUMBER" => "PHONE",
-            "LOCATION" => "LOCATION",
-            "ORGANIZATION" => "ORG",
-            "STREET_ADDRESS" => "ADDRESS",
-            "POSTAL_CODE" => "POSTCODE",
-            "DATE_TIME" => "DATE",
-            "CREDIT_CARD" => "CARD",
-            "IBAN_CODE" => "IBAN",
-            "IP_ADDRESS" => "IP",
-            "URL" => "URL",
-            "ID_NUMBER" => "ID",
-            "INDIRECT_IDENTIFIER" => "DETAIL",
-            _ => return Err("Unsupported identity category".into()),
-        };
-        let original = original.trim();
-        if original.is_empty() || original.len() > 10_000 {
-            return Err("Enter an identity between 1 and 10,000 bytes".into());
-        }
-        let key = (category.to_string(), identity_key(category, original));
+        let prefix = category_prefix(category).ok_or("Unsupported identity category")?;
+        let (original, normalized) = mapping_value(category, original)?;
+        let key = (category.to_string(), normalized);
         let index = self.identity_index.get_or_init(|| {
             let mut index = HashMap::new();
             for (position, identity) in self.pseudonyms.iter().enumerate() {
@@ -262,13 +412,12 @@ impl SessionVault {
             return Ok(self.pseudonyms[*position].clone());
         }
         let counter = self.counters.entry(category.into()).or_default();
-        let pseudonym = loop {
-            *counter += 1;
-            let candidate = format!("{prefix}_{:03}", *counter);
-            if !source.contains(&candidate) {
-                break candidate;
-            }
-        };
+        let (next, pseudonym) = next_token(
+            i64::try_from(*counter).map_err(|_| "Pseudonym counter is exhausted")?,
+            prefix,
+            source,
+        )?;
+        *counter = usize::try_from(next).map_err(|_| "Pseudonym counter is exhausted")?;
         let identity = SavedIdentity {
             id: uuid::Uuid::new_v4().to_string(),
             entity_type: category.into(),
@@ -289,50 +438,27 @@ impl SessionVault {
         detections: Vec<ReviewedEntity>,
         mode: &str,
     ) -> Result<ProcessedRecord, String> {
-        if !matches!(mode, "anonymize" | "pseudonymize") {
-            return Err("Choose a valid processing mode".into());
-        }
-        let approved = validate_reviewed_detections(text.clone(), detections)?;
-        if approved.is_empty() {
-            return Err("Accept at least one detection before processing".into());
-        }
+        let approved = approved_detections(&text, detections, mode)?;
         if mode == "pseudonymize" && self.records.len() >= 100 {
             return Err("Document history is full. Clear history in the Vault; saved identities will be kept.".into());
         }
-        let chars: Vec<char> = text.chars().collect();
-        let mut output = String::new();
-        let mut cursor = 0;
-        let mut temporary_identities = SessionVault::default();
-        let mut export_replacements = Vec::with_capacity(approved.len());
-        for entity in &approved {
-            output.extend(chars[cursor..entity.start].iter());
-            let identity = if mode == "anonymize" {
-                temporary_identities.save_identity(&entity.entity_type, &entity.text, &text)?
+        let mut temporary = TemporaryMappings::default();
+        let record = render_processed(&text, &approved, mode, |entity| {
+            if mode == "anonymize" {
+                temporary.token(entity, &text)
             } else {
-                self.save_identity(&entity.entity_type, &entity.text, &text)?
-            };
-            output.push_str(&identity.pseudonym);
-            export_replacements.push(crate::docx::Replacement {
-                start: entity.start,
-                end: entity.end,
-                text: entity.text.clone(),
-                replacement: identity.pseudonym,
-            });
-            cursor = entity.end;
-        }
-        output.extend(chars[cursor..].iter());
-        let record = ProcessedRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            mode: mode.into(),
-            text: output,
-            count: approved.len(),
-            export_replacements,
-        };
+                self.save_identity(&entity.entity_type, &entity.text, &text)
+                    .map(|identity| identity.pseudonym)
+            }
+        })?;
         if mode == "anonymize" {
             return Ok(record);
         }
         self.records.push(StoredRecord {
-            public: ProcessedRecord { export_replacements: Vec::new(), ..record.clone() },
+            public: ProcessedRecord {
+                export_replacements: Vec::new(),
+                ..record.clone()
+            },
             original: (mode == "pseudonymize").then_some(text),
         });
         Ok(record)
@@ -380,40 +506,57 @@ pub struct VaultStatus {
 }
 
 #[tauri::command]
-pub fn vault_status(
-    app: tauri::AppHandle,
-    vault: State<'_, VaultState>,
+pub async fn vault_status(app: tauri::AppHandle) -> Result<VaultStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = vault_path(&app)?;
+        current_vault_status(path, &app.state::<VaultState>())
+    })
+    .await
+    .map_err(|_| "Unable to read Vault status")?
+}
+
+fn current_vault_status(
+    path: std::path::PathBuf,
+    vault: &VaultState,
 ) -> Result<VaultStatus, String> {
-    let path = vault_path(&app)?;
-    let exists = path.exists();
-    let authentication_required =
-        exists && UnlockedVault::requires_authentication(&path).unwrap_or(true);
-    // A damaged file remains resettable, but is never treated as a new Vault.
-    let needs_migration = cfg!(any(windows, target_os = "macos"))
-        && exists
-        && UnlockedVault::needs_passphrase_migration(&path).unwrap_or(false);
-    if !vault.1.swap(true, std::sync::atomic::Ordering::SeqCst)
-        && exists
-        && !needs_migration
-        && !authentication_required
-        && cfg!(any(windows, target_os = "macos"))
-    {
-        let mut opened = vault.0.lock().map_err(|_| "The Vault is unavailable")?;
-        if opened.is_none() {
-            *opened = Some(UnlockedVault::open_account(path.clone(), false)?);
+    let mut session = vault.enter()?;
+    let mut needs_migration = false;
+    let (exists, mode) = if let Some(opened) = &session.opened {
+        (true, Some(opened.mode()))
+    } else {
+        match database::inspect(&path) {
+            Ok(snapshot) => {
+                let mode = snapshot.mode();
+                needs_migration = snapshot.needs_migration();
+                if !session.checked_auto_open
+                    && mode == Some(Mode::Account)
+                    && Mode::account_supported()
+                {
+                    session.checked_auto_open = true;
+                    session.advance()?;
+                    session.opened = Some(database::Vault::open(
+                        path,
+                        snapshot,
+                        "",
+                        false,
+                        Mode::Account,
+                    )?);
+                    needs_migration = false;
+                }
+                (mode.is_some(), mode)
+            }
+            // Report an existing Vault so the UI never offers to create over corruption.
+            Err(_) => (true, None),
         }
-    }
+    };
+    session.checked_auto_open = true;
     Ok(VaultStatus {
         exists,
-        authentication_required,
+        authentication_required: mode == Some(Mode::System),
         needs_migration,
-        code_required: exists && UnlockedVault::needs_passphrase_migration(&path).unwrap_or(false),
-        account_supported: cfg!(any(windows, target_os = "macos")),
-        unlocked: vault
-            .0
-            .lock()
-            .map_err(|_| "The vault is unavailable")?
-            .is_some(),
+        code_required: exists && (mode.is_none() || mode == Some(Mode::Passphrase)),
+        account_supported: Mode::account_supported(),
+        unlocked: session.opened.is_some(),
     })
 }
 
@@ -429,34 +572,40 @@ pub async fn unlock_vault(
 ) -> Result<(), String> {
     let password = Zeroizing::new(password);
     let path = vault_path(&app)?;
-    let require_authentication = if path.exists() {
-        UnlockedVault::requires_authentication(&path)?
-    } else {
-        require_authentication.unwrap_or(false)
+    let epoch = {
+        let session = vault.enter()?;
+        if session.opened.is_some() {
+            return Err("The Vault is already unlocked".into());
+        }
+        session.epoch
     };
-    if require_authentication {
+    let snapshot = database::inspect(&path)?;
+    let mode = match snapshot.mode() {
+        Some(mode) => mode,
+        None => Mode::from_options(
+            use_account.unwrap_or(Mode::account_supported()),
+            require_authentication.unwrap_or(false),
+        )?,
+    };
+    if mode.requires_authentication() {
         crate::os_auth::verify(window).await?;
     }
-    let mut state = vault.0.lock().map_err(|_| "The vault is unavailable")?;
-    if state.is_some() {
-        return Err("The vault is already unlocked".into());
-    }
-    let use_account = use_account.unwrap_or(cfg!(any(windows, target_os = "macos")));
-    if use_account && password.is_empty() {
-        *state = Some(UnlockedVault::open_account_with_auth(
-            path,
-            false,
-            require_authentication,
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<VaultState>();
+        let mut session = state.enter()?;
+        session.verify_epoch(epoch)?;
+        if session.opened.is_some() {
+            return Err("The Vault is already unlocked".into());
+        }
+        session.advance()?;
+        session.checked_auto_open = true;
+        session.opened = Some(database::Vault::open(
+            path, snapshot, &password, create, mode,
         )?);
-    } else {
-        let opened = UnlockedVault::open(path, &password, create)?;
-        *state = Some(if use_account {
-            opened.migrate_to_account()?
-        } else {
-            opened
-        });
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Vault unlock could not finish")?
 }
 
 fn check_reset_confirmation(confirmation: &str) -> Result<(), String> {
@@ -473,23 +622,23 @@ pub fn reset_vault(
     vault: State<'_, VaultState>,
 ) -> Result<(), String> {
     check_reset_confirmation(&confirmation)?;
-    let mut state = vault.0.lock().map_err(|_| "The vault is unavailable")?;
-    if let Some(opened) = state.as_mut() {
-        opened.update(|data| {
-            *data = SessionVault::default();
-            Ok(())
-        })?;
-    } else if cfg!(any(windows, target_os = "macos")) {
-        *state = Some(UnlockedVault::open_account(vault_path(&app)?, true)?);
+    let mut session = vault.enter()?;
+    session.advance()?;
+    if let Some(opened) = session.opened.as_mut() {
+        opened.repo.reset()?;
     } else {
-        return Err("Unlock your Vault before resetting it".into());
+        session.opened = Some(database::Vault::reset_locked(vault_path(&app)?)?);
     }
+    session.checked_auto_open = true;
     Ok(())
 }
 
 #[tauri::command]
 pub fn lock_vault(vault: State<'_, VaultState>) -> Result<(), String> {
-    *vault.0.lock().map_err(|_| "The vault is unavailable")? = None;
+    let mut session = vault.enter()?;
+    session.advance()?;
+    session.checked_auto_open = true;
+    session.opened = None;
     Ok(())
 }
 
@@ -499,24 +648,32 @@ pub fn process_reviewed_text(
     text: String,
     detections: Vec<ReviewedEntity>,
     mode: String,
+    operation_id: Option<String>,
     vault: State<'_, VaultState>,
 ) -> Result<ProcessedResponse, String> {
-    // Anonymization is transient: never open, read, or update the persistent Vault.
-    if mode == "anonymize" {
-        return SessionVault::default().process(text, detections, &mode).map(ProcessedResponse::from);
-    }
-    vault
-        .0
-        .lock()
-        .map_err(|_| "The vault is unavailable")?
-        .as_mut()
-        .ok_or("Unlock the Vault before processing")?
-        .update(|data| {
-            data.update_project(project_id.as_deref(), |project| {
-                project.process(text, detections, &mode)
-            })
-        })
-        .map(ProcessedResponse::from)
+    let approved = approved_detections(&text, detections, &mode)?;
+    let record = if mode == "anonymize" {
+        let mut identities = TemporaryMappings::default();
+        render_processed(&text, &approved, &mode, |entity| {
+            identities.token(entity, &text)
+        })?
+    } else {
+        let operation_id = operation_id
+            .as_deref()
+            .map(uuid::Uuid::parse_str)
+            .transpose()
+            .map_err(|_| "Invalid processing request identifier")?;
+        vault.write(|opened| {
+            opened
+                .repo
+                .process(scope(&project_id), text, approved, operation_id)
+        })?
+    };
+    Ok(record.into())
+}
+
+fn scope(project: &Option<String>) -> &str {
+    project.as_deref().unwrap_or("default")
 }
 
 #[tauri::command]
@@ -524,19 +681,7 @@ pub fn list_vault_records(
     project_id: Option<String>,
     vault: State<'_, VaultState>,
 ) -> Result<Vec<ProcessedRecord>, String> {
-    Ok(vault
-        .0
-        .lock()
-        .map_err(|_| "The vault is unavailable")?
-        .as_ref()
-        .ok_or("Unlock the Vault to view records")?
-        .data
-        .project(project_id.as_deref())?
-        .records
-        .iter()
-        .rev()
-        .map(|record| record.public.clone())
-        .collect())
+    vault.read(|opened| opened.repo.records(scope(&project_id)))
 }
 
 #[tauri::command]
@@ -544,16 +689,7 @@ pub fn list_saved_identities(
     project_id: Option<String>,
     vault: State<'_, VaultState>,
 ) -> Result<Vec<SavedIdentity>, String> {
-    Ok(vault
-        .0
-        .lock()
-        .map_err(|_| "The vault is unavailable")?
-        .as_ref()
-        .ok_or("Unlock the Vault to view identities")?
-        .data
-        .project(project_id.as_deref())?
-        .pseudonyms
-        .clone())
+    vault.read(|opened| opened.repo.mappings(scope(&project_id)))
 }
 
 #[tauri::command]
@@ -563,17 +699,11 @@ pub fn save_identity(
     entity_type: String,
     vault: State<'_, VaultState>,
 ) -> Result<SavedIdentity, String> {
-    vault
-        .0
-        .lock()
-        .map_err(|_| "The vault is unavailable")?
-        .as_mut()
-        .ok_or("Unlock the Vault before saving identities")?
-        .update(|data| {
-            data.update_project(project_id.as_deref(), |project| {
-                project.save_identity(&entity_type, &original, "")
-            })
-        })
+    vault.write(|opened| {
+        opened
+            .repo
+            .save_mapping(scope(&project_id), &entity_type, &original)
+    })
 }
 
 #[tauri::command]
@@ -582,17 +712,7 @@ pub fn delete_saved_identity(
     id: String,
     vault: State<'_, VaultState>,
 ) -> Result<(), String> {
-    vault
-        .0
-        .lock()
-        .map_err(|_| "The Vault is unavailable")?
-        .as_mut()
-        .ok_or("Unlock the Vault before deleting mappings")?
-        .update(|data| {
-            data.update_project(project_id.as_deref(), |project| {
-                project.delete_identity(&id)
-            })
-        })
+    vault.write(|opened| opened.repo.delete_mapping(scope(&project_id), &id))
 }
 
 pub(crate) fn find_matches(
@@ -634,17 +754,7 @@ pub fn find_saved_identity(
     text: String,
     vault: State<'_, VaultState>,
 ) -> Result<Vec<ReviewedEntity>, String> {
-    let state = vault.0.lock().map_err(|_| "The vault is unavailable")?;
-    let identity = state
-        .as_ref()
-        .ok_or("Unlock the Vault first")?
-        .data
-        .project(project_id.as_deref())?
-        .pseudonyms
-        .iter()
-        .find(|identity| identity.id == id)
-        .ok_or("Saved identity not found")?;
-    find_matches(identity, &text)
+    vault.read(|opened| find_matches(&opened.repo.mapping(scope(&project_id), &id)?, &text))
 }
 
 #[tauri::command]
@@ -653,15 +763,7 @@ pub fn restore_vault_record(
     id: String,
     vault: State<'_, VaultState>,
 ) -> Result<String, String> {
-    vault
-        .0
-        .lock()
-        .map_err(|_| "The vault is unavailable")?
-        .as_ref()
-        .ok_or("Unlock the Vault to restore records")?
-        .data
-        .project(project_id.as_deref())?
-        .restore(&id)
+    vault.read(|opened| opened.repo.restore(scope(&project_id), &id))
 }
 
 #[tauri::command]
@@ -669,18 +771,7 @@ pub fn clear_vault_records(
     project_id: Option<String>,
     vault: State<'_, VaultState>,
 ) -> Result<(), String> {
-    vault
-        .0
-        .lock()
-        .map_err(|_| "The vault is unavailable")?
-        .as_mut()
-        .ok_or("Unlock the Vault first")?
-        .update(|data| {
-            data.update_project(project_id.as_deref(), |project| {
-                project.records.clear();
-                Ok(())
-            })
-        })
+    vault.write(|opened| opened.repo.clear_history(scope(&project_id)))
 }
 
 fn rendered_pdf(text: &str) -> Result<Vec<u8>, String> {
@@ -1021,6 +1112,7 @@ mod integration_tests {
 
 #[tauri::command]
 pub async fn set_vault_protection(
+    app: tauri::AppHandle,
     window: tauri::Window,
     use_account: bool,
     require_authentication: Option<bool>,
@@ -1028,26 +1120,34 @@ pub async fn set_vault_protection(
     vault: State<'_, VaultState>,
 ) -> Result<(), String> {
     let password = Zeroizing::new(password);
-    let require_authentication = require_authentication.unwrap_or(false);
-    let previously_required = vault
-        .0
-        .lock()
-        .map_err(|_| "The Vault is unavailable")?
-        .as_ref()
-        .ok_or("Unlock the Vault before changing its protection")?
-        .authentication_required;
-    // Verify before enabling system sign-in, and before removing an existing
-    // system sign-in requirement. Cancellation never changes saved protection.
-    if require_authentication || previously_required {
+    let mode = Mode::from_options(use_account, require_authentication.unwrap_or(false))?;
+    let (epoch, old_mode) = {
+        let session = vault.enter()?;
+        (
+            session.epoch,
+            session
+                .opened
+                .as_ref()
+                .ok_or("Unlock the Vault before changing its protection")?
+                .mode(),
+        )
+    };
+    if mode.requires_authentication() || old_mode.requires_authentication() {
         crate::os_auth::verify(window).await?;
     }
-    vault
-        .0
-        .lock()
-        .map_err(|_| "The Vault is unavailable")?
-        .as_mut()
-        .ok_or("Unlock the Vault before changing its protection")?
-        .change_protection_with_auth(use_account, &password, require_authentication)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<VaultState>();
+        let mut session = state.enter()?;
+        session.verify_epoch(epoch)?;
+        session.advance()?;
+        session
+            .opened
+            .as_mut()
+            .ok_or("Unlock the Vault before changing its protection")?
+            .change_protection(mode, &password)
+    })
+    .await
+    .map_err(|_| "Unable to finish changing Vault protection")?
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1056,12 +1156,7 @@ pub struct DetectionRule {
     pub entity_type: String,
 }
 
-#[tauri::command]
-pub fn save_detection_rules(
-    project_id: Option<String>,
-    rules: Vec<DetectionRule>,
-    vault: State<'_, VaultState>,
-) -> Result<(), String> {
+pub(crate) fn validate_rules(rules: &[DetectionRule]) -> Result<(), String> {
     if rules.len() > 200
         || rules.iter().any(|rule| {
             rule.phrase.trim().is_empty()
@@ -1073,18 +1168,16 @@ pub fn save_detection_rules(
             "Use up to 200 non-empty phrases of at most 500 bytes with valid categories".into(),
         );
     }
-    vault
-        .0
-        .lock()
-        .map_err(|_| "The Vault is unavailable")?
-        .as_mut()
-        .ok_or("Unlock the Vault before saving detection rules")?
-        .update(|data| {
-            data.update_project(project_id.as_deref(), |project| {
-                project.rules = rules;
-                Ok(())
-            })
-        })
+    Ok(())
+}
+
+#[tauri::command]
+pub fn save_detection_rules(
+    project_id: Option<String>,
+    rules: Vec<DetectionRule>,
+    vault: State<'_, VaultState>,
+) -> Result<(), String> {
+    vault.write(|opened| opened.repo.replace_rules(scope(&project_id), &rules))
 }
 
 #[tauri::command]
@@ -1092,16 +1185,7 @@ pub fn list_detection_rules(
     project_id: Option<String>,
     vault: State<'_, VaultState>,
 ) -> Result<Vec<DetectionRule>, String> {
-    Ok(vault
-        .0
-        .lock()
-        .map_err(|_| "The Vault is unavailable")?
-        .as_ref()
-        .ok_or("Unlock the Vault first")?
-        .data
-        .project(project_id.as_deref())?
-        .rules
-        .clone())
+    vault.read(|opened| opened.repo.rules(scope(&project_id)))
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1158,24 +1242,22 @@ pub async fn detect_with_rules(
 ) -> Result<serde_json::Value, String> {
     let options = options.unwrap_or_default();
     options.validate()?;
-    let rules = vault
-        .0
-        .lock()
-        .map_err(|_| "The Vault is unavailable")?
-        .as_ref()
-        .map(|opened| {
-            opened
-                .data
-                .project(project_id.as_deref())
-                .map(|project| project.rules.clone())
-        })
-        .transpose()?
-        .unwrap_or_default();
-    tauri::async_runtime::spawn_blocking(move || {
+    let (rules, epoch) = {
+        let session = vault.enter()?;
+        match &session.opened {
+            Some(opened) => (opened.repo.rules(scope(&project_id))?, Some(session.epoch)),
+            None => (Vec::new(), None),
+        }
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || {
         crate::run_detection_with_options(text, entities, rules, options)
     })
     .await
-    .map_err(|_| "The local detection task stopped unexpectedly".to_string())?
+    .map_err(|_| "The local detection task stopped unexpectedly".to_string())?;
+    if let Some(epoch) = epoch {
+        vault.enter()?.verify_epoch(epoch)?;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1599,5 +1681,19 @@ mod project_tests {
             .unwrap();
         assert_eq!(output.text, "PERSON_001");
         assert_eq!(before, serde_json::to_value(&upgraded).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod vault_session_tests {
+    use super::VaultSession;
+
+    #[test]
+    fn an_action_cannot_continue_after_an_epoch_transition() {
+        let mut session = VaultSession::default();
+        let in_flight = session.epoch;
+        assert!(session.verify_epoch(in_flight).is_ok());
+        session.advance().unwrap();
+        assert!(session.verify_epoch(in_flight).is_err());
     }
 }

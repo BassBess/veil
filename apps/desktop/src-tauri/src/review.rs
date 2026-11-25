@@ -11,28 +11,19 @@ pub struct ReviewedEntity {
 }
 
 pub(crate) fn supported_entity(entity_type: &str) -> bool {
-    matches!(
-        entity_type,
-        "PERSON"
-            | "EMAIL_ADDRESS"
-            | "PHONE_NUMBER"
-            | "LOCATION"
-            | "ORGANIZATION"
-            | "STREET_ADDRESS"
-            | "POSTAL_CODE"
-            | "DATE_TIME"
-            | "CREDIT_CARD"
-            | "IBAN_CODE"
-            | "IP_ADDRESS"
-            | "URL"
-            | "ID_NUMBER"
-            | "INDIRECT_IDENTIFIER"
-    )
+    crate::protection::category_prefix(entity_type).is_some()
 }
 
 #[tauri::command]
 pub fn validate_reviewed_detections(
     text: String,
+    detections: Vec<ReviewedEntity>,
+) -> Result<Vec<ReviewedEntity>, String> {
+    validate_spans(&text, detections)
+}
+
+pub(crate) fn validate_spans(
+    text: &str,
     detections: Vec<ReviewedEntity>,
 ) -> Result<Vec<ReviewedEntity>, String> {
     if text.len() > 500_000 {

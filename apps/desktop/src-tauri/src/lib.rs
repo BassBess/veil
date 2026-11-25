@@ -1,5 +1,6 @@
 use tauri::Manager;
 mod account_key;
+mod database;
 mod documents;
 mod docx;
 #[cfg(test)]

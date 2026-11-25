@@ -138,6 +138,8 @@ function App() {
   const dropRegionRef = useRef<HTMLElement>(null);
   const [vaultStatus, setVaultStatus] = useState<VaultStatus>({ exists: false, unlocked: false, account_supported: false, authentication_required: false, code_required: false, needs_migration: false });
   const vaultLoadRef = useRef(0);
+  const vaultActionEpoch = useRef(0);
+  const processingInFlight = useRef(false);
   const [vaultBusy, setVaultBusy] = useState(false);
   const [savedIdentities, setSavedIdentities] = useState<SavedIdentity[]>([]);
   const [identityQuery, setIdentityQuery] = useState("");
@@ -259,6 +261,7 @@ function App() {
   function selectProject(id: string) {
     if (id === projectId) return;
     ++vaultLoadRef.current;
+    ++vaultActionEpoch.current;
     setProjectId(id);
     setSavedIdentities([]); setVaultRecords([]); setSavedRules([]);
     setRestoredText(null); setProcessed(null); setIdentityQuery(""); setSettingsMessage("");
@@ -314,13 +317,20 @@ function App() {
 
   async function lockVault() {
     ++vaultLoadRef.current;
+    ++vaultActionEpoch.current;
     setVaultBusy(true);
     try {
       await invoke("lock_vault");
       setRestoredText(null);
       setSavedIdentities([]);
       setVaultRecords([]);
+      setSavedRules([]);
+      setProjects([]);
       setProcessed(null);
+      setValidation(null);
+      setIdentityQuery("");
+      if (identityNameRef.current) identityNameRef.current.value = "";
+      if (rulesRef.current) rulesRef.current.value = "";
       await refreshVault();
     } catch (error) { setVaultError(String(error)); }
     finally { setVaultBusy(false); }
@@ -352,10 +362,12 @@ function App() {
   }
 
   async function applySavedIdentity(id: string) {
+    const epoch = vaultActionEpoch.current;
     setLoading(true);
     setVaultError("");
     try {
       const found = await invoke<ValidatedDetection[]>("find_saved_identity", { id, text, projectId });
+      if (epoch !== vaultActionEpoch.current) return;
       if (!found.length) {
         setVaultError("No matches in the current document. Paste or upload a document containing this identity first.");
         return;
@@ -421,6 +433,7 @@ function App() {
     const confirmation = resetConfirmationRef.current?.value ?? "";
     setVaultBusy(true); setResetError("");
     try {
+      ++vaultActionEpoch.current;
       await invoke("reset_vault", { confirmation });
       setProjectId("default");
       ++vaultLoadRef.current;
@@ -499,10 +512,14 @@ function App() {
   }
 
   async function restoreRecord(id: string) {
+    const epoch = vaultActionEpoch.current;
     setVaultBusy(true);
     setVaultError("");
     setRestoredText(null);
-    try { setRestoredText(await invoke<string>("restore_vault_record", { id, projectId })); }
+    try {
+      const original = await invoke<string>("restore_vault_record", { id, projectId });
+      if (epoch === vaultActionEpoch.current) setRestoredText(original);
+    }
     catch (error) { setVaultError(String(error)); }
     finally { setVaultBusy(false); }
   }
@@ -836,7 +853,7 @@ function App() {
 
 
   async function validateAcceptedDetections(includePending = false) {
-    if (loading || !analyzed || editingId !== null) return;
+    if (loading || processingInFlight.current || !analyzed || editingId !== null) return;
     if (workspaceView === "Pseudonymize" && !vaultStatus.unlocked) {
       vaultPromptRef.current?.showModal();
       return;
@@ -859,12 +876,15 @@ function App() {
     setProcessed(null);
     setLoading(true);
     setValidation(null);
+    const epoch = vaultActionEpoch.current;
+    processingInFlight.current = true;
 
     try {
       const mode = workspaceView === "Pseudonymize" ? "pseudonymize" : "anonymize";
       const result = await invoke<ProcessedRecord>("process_reviewed_text", {
-        text, detections: accepted, mode, projectId,
+        text, detections: accepted, mode, projectId, operationId: crypto.randomUUID(),
       });
+      if (mode === "pseudonymize" && epoch !== vaultActionEpoch.current) return;
       setProcessed({record: result, snapshot, mode: workspaceView});
       setExportMessage("");
 
@@ -880,6 +900,7 @@ function App() {
         message: `Processing failed: ${String(err)}`,
       });
     } finally {
+      processingInFlight.current = false;
       setLoading(false);
     }
   }
