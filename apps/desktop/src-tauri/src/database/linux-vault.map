@@ -1,0 +1,5 @@
+{
+    local:
+        sqlite3*;
+        sqlcipher*;
+};

@@ -69,6 +69,8 @@ for model installation on each computer and current language coverage.
 
 ## Local Vault sign-in
 
+The persistent Vault uses SQLCipher. See the [database documentation](docs/database/ARCHITECTURE.md) for migration, recovery, and security details.
+
 Anonymization works without creating or unlocking a Vault. It replaces reviewed
 information with consistent document-local tokens such as `PERSON_001`, `EMAIL_001`, and `LOCATION_001`, keeps the result only in the current workspace,
 and supports TXT/PDF export without saving document history to the Vault.
@@ -84,7 +86,7 @@ In Settings > Vault sign-in, choose one of three modes:
 
 Unlock the existing Vault before changing its mode, then click **Apply Vault setting**. Enabling system sign-in verifies it before saving the change. Removing an existing system sign-in requirement also requires verification. Existing no-extra-password Vaults retain their setting until changed.
 
-All modes keep the Vault encrypted locally. Account modes store the encryption key using Windows DPAPI or macOS Keychain; passphrase mode derives it using Argon2. Native sign-in adds an application access check; it does not make account keys hardware-bound or protect against malicious software already running as the same OS user. VEIL never receives the OS password, PIN or biometric data.
+All modes keep the Vault encrypted locally. Windows DPAPI and macOS Keychain protect the database key in account modes. In passphrase mode, Argon2id derives a separate key that wraps the database key. Native sign-in adds an application access check. The database key remains accessible through the underlying OS account mechanism. Veil never receives the OS password, PIN or biometric data.
 
 System sign-in requires the OS authentication service to be available. If Windows Hello is not configured, set up a PIN in Windows Settings > Accounts > Sign-in options, or use a Vault passphrase. The macOS implementation requires validation on a Mac before release.
 

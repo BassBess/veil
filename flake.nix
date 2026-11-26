@@ -20,6 +20,7 @@
           gh
           gcc
           gnumake
+          perl
           openssl
           glib
           gtk3

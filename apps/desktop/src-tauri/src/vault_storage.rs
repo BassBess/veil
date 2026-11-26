@@ -1,15 +1,18 @@
 use crate::protection::SessionVault;
+#[cfg(test)]
+use aes_gcm::aead::{AeadCore, OsRng, rand_core::RngCore};
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{Aead, AeadCore, KeyInit, OsRng, rand_core::RngCore},
+    aead::{Aead, KeyInit},
 };
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
-    path::PathBuf,
+    io::Read,
 };
+#[cfg(test)]
+use std::{io::Write, path::PathBuf};
 use zeroize::Zeroizing;
 
 const FORMAT_VERSION: u32 = 1;
@@ -36,6 +39,7 @@ struct Envelope {
     account_platform: Option<String>,
 }
 
+#[cfg(test)]
 pub struct UnlockedVault {
     pub data: SessionVault,
     key: Zeroizing<[u8; 32]>,
@@ -47,7 +51,7 @@ pub struct UnlockedVault {
     _lock: File,
 }
 
-fn acquire_lock(path: &std::path::Path) -> Result<File, String> {
+pub(crate) fn acquire_lock(path: &std::path::Path) -> Result<File, String> {
     let parent = path.parent().ok_or("Invalid vault location")?;
     std::fs::create_dir_all(parent).map_err(|_| "Unable to access the vault folder")?;
     let lock = OpenOptions::new()
@@ -63,15 +67,16 @@ fn acquire_lock(path: &std::path::Path) -> Result<File, String> {
 }
 
 fn read_envelope(path: &std::path::Path) -> Result<Envelope, String> {
-    if std::fs::metadata(path)
+    let mut bytes = Vec::new();
+    File::open(path)
         .map_err(|_| "Unable to read the Vault")?
-        .len()
-        > MAX_VAULT_BYTES
-    {
+        .take(MAX_VAULT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Unable to read the Vault")?;
+    if bytes.len() as u64 > MAX_VAULT_BYTES {
         return Err("The vault file exceeds the supported size".into());
     }
-    serde_json::from_slice(&std::fs::read(path).map_err(|_| "Unable to read the Vault")?)
-        .map_err(|_| "The vault file is damaged or unsupported".into())
+    serde_json::from_slice(&bytes).map_err(|_| "The vault file is damaged or unsupported".into())
 }
 
 fn derive_key(password: &str, salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>, String> {
@@ -82,19 +87,95 @@ fn derive_key(password: &str, salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>, St
     Ok(key)
 }
 
+#[derive(PartialEq, Eq)]
+pub(crate) struct LegacyHeader {
+    version: u32,
+    nonce: [u8; 12],
+}
+
+impl LegacyHeader {
+    pub(crate) fn mode(&self) -> crate::database::Mode {
+        match self.version {
+            1 => crate::database::Mode::Passphrase,
+            2 => crate::database::Mode::Account,
+            _ => crate::database::Mode::System,
+        }
+    }
+}
+
+pub(crate) fn legacy_header(path: &std::path::Path) -> Result<LegacyHeader, String> {
+    let envelope = read_envelope(path)?;
+    if !matches!(envelope.version, FORMAT_VERSION | 2 | 3) {
+        return Err("This Vault format is unsupported".into());
+    }
+    Ok(LegacyHeader {
+        version: envelope.version,
+        nonce: envelope.nonce,
+    })
+}
+
+/// Caller holds the original Vault's lock and has completed required native verification.
+pub(crate) fn read_legacy(
+    path: &std::path::Path,
+    header: &LegacyHeader,
+    password: &str,
+) -> Result<SessionVault, String> {
+    let envelope = read_envelope(path)?;
+    if envelope.version != header.version || envelope.nonce != header.nonce {
+        return Err("The legacy Vault changed. Start sign-in again.".into());
+    }
+    let key = if envelope.version == FORMAT_VERSION {
+        derive_key(password, &envelope.salt)?
+    } else {
+        if envelope.account_platform.as_deref().unwrap_or("windows") != std::env::consts::OS {
+            return Err("This Vault uses another operating system's account protection".into());
+        }
+        let protected = envelope
+            .account_key
+            .as_ref()
+            .ok_or("The legacy account-protected key is missing")?;
+        let decrypted = Zeroizing::new(crate::account_key::unprotect(protected)?);
+        let mut key = Zeroizing::new([0; 32]);
+        if decrypted.len() != key.len() {
+            return Err("Invalid legacy Vault key length".into());
+        }
+        key.copy_from_slice(&decrypted);
+        key
+    };
+    let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| "Invalid legacy Vault key")?;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(&envelope.nonce),
+                aes_gcm::aead::Payload {
+                    msg: &envelope.ciphertext,
+                    aad: associated_data(envelope.version == 3),
+                },
+            )
+            .map_err(|_| "Incorrect credentials or damaged legacy Vault")?,
+    );
+    serde_json::from_slice(&plaintext)
+        .map_err(|_| "The legacy Vault contents are unsupported".into())
+}
+
+#[cfg(test)]
 impl UnlockedVault {
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn requires_authentication(path: &std::path::Path) -> Result<bool, String> {
         Ok(read_envelope(path)?.version == 3)
     }
 
+    #[cfg(windows)]
     pub fn needs_passphrase_migration(path: &std::path::Path) -> Result<bool, String> {
         Ok(read_envelope(path)?.version == 1)
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn open_account(path: PathBuf, reset: bool) -> Result<Self, String> {
         Self::open_account_with_auth(path, reset, false)
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn open_account_with_auth(
         path: PathBuf,
         reset: bool,
@@ -168,6 +249,7 @@ impl UnlockedVault {
         Ok(vault)
     }
 
+    #[cfg(windows)]
     pub fn migrate_to_account(mut self) -> Result<Self, String> {
         let mut key = Zeroizing::new([0u8; 32]);
         OsRng.fill_bytes(&mut *key);
@@ -243,11 +325,12 @@ impl UnlockedVault {
         Ok(vault)
     }
 
-    #[cfg(test)]
+    #[cfg(windows)]
     pub fn change_protection(&mut self, use_account: bool, password: &str) -> Result<(), String> {
         self.change_protection_with_auth(use_account, password, false)
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn change_protection_with_auth(
         &mut self,
         use_account: bool,
