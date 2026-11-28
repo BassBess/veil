@@ -293,6 +293,10 @@ pub(crate) fn mapping_value<'a>(
     if category_prefix(category).is_none() {
         return Err("Unsupported identity category".into());
     }
+    identity_value(category, value)
+}
+
+fn identity_value<'a>(category: &str, value: &'a str) -> Result<(&'a str, String), String> {
     let original = value.trim();
     if original.is_empty() || original.len() > 10_000 {
         return Err("Enter an identity between 1 and 10,000 bytes".into());
@@ -324,12 +328,16 @@ struct TemporaryMappings {
 
 impl TemporaryMappings {
     fn token(&mut self, entity: &ReviewedEntity, source: &str) -> Result<String, String> {
-        let (_, value) = mapping_value(&entity.entity_type, &entity.text)?;
+        let prefix = if crate::review::custom_entity(&entity.entity_type) {
+            entity.entity_type.as_str()
+        } else {
+            category_prefix(&entity.entity_type).ok_or("Unsupported identity category")?
+        };
+        let (_, value) = identity_value(&entity.entity_type, &entity.text)?;
         let key = (entity.entity_type.clone(), value);
         if let Some(token) = self.tokens.get(&key) {
             return Ok(token.clone());
         }
-        let prefix = category_prefix(&entity.entity_type).ok_or("Unsupported identity category")?;
         let counter = self.counters.entry(entity.entity_type.clone()).or_default();
         let (next, token) = next_token(*counter, prefix, source)?;
         *counter = next;
@@ -338,15 +346,54 @@ impl TemporaryMappings {
     }
 }
 
+/// The document workflow selects the mapping component and its storage boundary.
+#[derive(Clone, Copy)]
+pub(crate) enum MappingMode {
+    Document,
+    Vault,
+}
+
+impl MappingMode {
+    fn resolve(mode: &str) -> Result<Self, String> {
+        match mode {
+            "anonymize" => Ok(Self::Document),
+            "pseudonymize" => Ok(Self::Vault),
+            _ => Err("Choose a valid processing mode".into()),
+        }
+    }
+
+    pub(crate) fn components() -> [serde_json::Value; 2] {
+        [
+            serde_json::json!({"id": "document-mapping", "name": "Document-local tokens",
+                "capabilities": ["entity_mapping"], "mandatory": true}),
+            serde_json::json!({"id": "vault-mapping", "name": "Encrypted Vault identities",
+                "capabilities": ["entity_mapping"], "mandatory": true}),
+        ]
+    }
+}
+
+trait EntityMapper {
+    fn map_entity(&mut self, entity: &ReviewedEntity) -> Result<String, String>;
+}
+
+impl<F: FnMut(&ReviewedEntity) -> Result<String, String>> EntityMapper for F {
+    fn map_entity(&mut self, entity: &ReviewedEntity) -> Result<String, String> {
+        self(entity)
+    }
+}
+
 pub(crate) fn approved_detections(
     text: &str,
     detections: Vec<ReviewedEntity>,
     mode: &str,
 ) -> Result<Vec<ReviewedEntity>, String> {
-    if !matches!(mode, "anonymize" | "pseudonymize") {
-        return Err("Choose a valid processing mode".into());
-    }
+    let mapping = MappingMode::resolve(mode)?;
     let approved = crate::review::validate_spans(text, detections)?;
+    if matches!(mapping, MappingMode::Vault)
+        && approved.iter().any(|span| crate::review::custom_entity(&span.entity_type))
+    {
+        return Err("Custom categories are supported in anonymization only".into());
+    }
     if approved.is_empty() {
         return Err("Accept at least one detection before processing".into());
     }
@@ -365,7 +412,7 @@ pub(crate) fn render_processed(
     let mut export_replacements = Vec::with_capacity(approved.len());
     for entity in approved {
         output.extend(chars[cursor..entity.start].iter());
-        let token = replacement(entity)?;
+        let token = replacement.map_entity(entity)?;
         output.push_str(&token);
         export_replacements.push(crate::docx::Replacement {
             start: entity.start,
@@ -652,22 +699,19 @@ pub fn process_reviewed_text(
     vault: State<'_, VaultState>,
 ) -> Result<ProcessedResponse, String> {
     let approved = approved_detections(&text, detections, &mode)?;
-    let record = if mode == "anonymize" {
-        let mut identities = TemporaryMappings::default();
-        render_processed(&text, &approved, &mode, |entity| {
-            identities.token(entity, &text)
-        })?
-    } else {
-        let operation_id = operation_id
-            .as_deref()
-            .map(uuid::Uuid::parse_str)
-            .transpose()
-            .map_err(|_| "Invalid processing request identifier")?;
-        vault.write(|opened| {
-            opened
-                .repo
-                .process(scope(&project_id), text, approved, operation_id)
-        })?
+    let record = match MappingMode::resolve(&mode)? {
+        MappingMode::Document => {
+            let mut identities = TemporaryMappings::default();
+            render_processed(&text, &approved, &mode, |entity| identities.token(entity, &text))?
+        }
+        MappingMode::Vault => {
+            let operation_id = operation_id
+                .as_deref()
+                .map(uuid::Uuid::parse_str)
+                .transpose()
+                .map_err(|_| "Invalid processing request identifier")?;
+            vault.write(|opened| opened.repo.process(scope(&project_id), text, approved, operation_id))?
+        }
     };
     Ok(record.into())
 }
@@ -904,6 +948,28 @@ mod tests {
     }
 
     #[test]
+    fn custom_categories_use_document_tokens_and_are_rejected_by_the_vault() {
+        let source = "α Ω-123 met Ω-123";
+        let spans = vec![
+            ReviewedEntity {
+                entity_type: "CUSTOM_ACCOUNT_ID".into(),
+                ..entity("custom-1", "Ω-123", 2)
+            },
+            ReviewedEntity {
+                entity_type: "CUSTOM_ACCOUNT_ID".into(),
+                ..entity("custom-2", "Ω-123", 12)
+            },
+        ];
+        let mut vault = SessionVault::default();
+        let record = vault.process(source.into(), spans.clone(), "anonymize").unwrap();
+        assert_eq!(record.text, "α CUSTOM_ACCOUNT_ID_001 met CUSTOM_ACCOUNT_ID_001");
+        assert!(matches!(vault.process(source.into(), spans, "pseudonymize"),
+            Err(message) if message.contains("anonymization only")));
+        assert!(vault.records.is_empty());
+        assert!(vault.pseudonyms.is_empty());
+    }
+
+    #[test]
     fn anonymization_reuses_document_tokens_for_all_categories() {
         let mut vault = SessionVault::default();
         for (category, label) in [
@@ -1078,7 +1144,7 @@ mod integration_tests {
     #[ignore = "requires the local Python engine and English model"]
     fn detect_review_process_and_restore_flow() {
         let original = "😀 Send to mira@example.com or copy mira@example.com.";
-        let detected = crate::detect_pii(original.into(), vec!["EMAIL_ADDRESS".into()]).unwrap();
+        let detected = crate::detect_default(original.into(), vec!["EMAIL_ADDRESS".into()]).unwrap();
         let hits = detected["detections"].as_array().unwrap();
         assert_eq!(hits.len(), 2);
         let reviewed: Vec<ReviewedEntity> = hits
@@ -1234,6 +1300,8 @@ impl DetectionOptions {
 
 #[tauri::command]
 pub async fn detect_with_rules(
+    app: tauri::AppHandle,
+    state: State<'_, crate::engine::EngineState>,
     project_id: Option<String>,
     text: String,
     entities: Vec<String>,
@@ -1249,11 +1317,7 @@ pub async fn detect_with_rules(
             None => (Vec::new(), None),
         }
     };
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        crate::run_detection_with_options(text, entities, rules, options)
-    })
-    .await
-    .map_err(|_| "The local detection task stopped unexpectedly".to_string())?;
+    let result = crate::engine::detect_local(app, state.inner().clone(), text, entities, rules, options).await;
     if let Some(epoch) = epoch {
         vault.enter()?.verify_epoch(epoch)?;
     }

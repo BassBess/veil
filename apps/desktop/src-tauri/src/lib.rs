@@ -3,15 +3,15 @@ mod account_key;
 mod database;
 mod documents;
 mod docx;
+mod engine;
 #[cfg(test)]
 mod identity_tests;
 mod os_auth;
 mod protection;
 mod review;
 mod vault_storage;
-use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 fn validate_detection_request(text: &str, entities: &[String]) -> Result<(), String> {
     if text.trim().is_empty() {
@@ -27,7 +27,7 @@ fn validate_detection_request(text: &str, entities: &[String]) -> Result<(), Str
     }
 
     for entity in entities {
-        if !review::supported_entity(entity) {
+        if !review::supported_entity(entity) && !review::custom_entity(entity) {
             return Err(format!("Unsupported PII category: {entity}"));
         }
     }
@@ -35,7 +35,7 @@ fn validate_detection_request(text: &str, entities: &[String]) -> Result<(), Str
     Ok(())
 }
 
-fn engine_command() -> Command {
+fn python_command(module: &str) -> Command {
     let engine_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../engines/python");
 
     #[cfg(windows)]
@@ -47,114 +47,42 @@ fn engine_command() -> Command {
     let mut command = Command::new(python);
     command
         .env("PYTHONUTF8", "1")
-        .arg("-m")
-        .arg("veil_engine.bridge")
+        .env("ORT_DISABLE_TELEMETRY", "1")
+        .env("PYTHONNOUSERSITE", "1")
+        .env_remove("PYTHONPATH")
+        .args(["-m", module])
         .current_dir(engine_dir);
     command
 }
 
-#[tauri::command]
-fn detect_pii(text: String, entities: Vec<String>) -> Result<serde_json::Value, String> {
-    run_detection(text, entities, vec![])
-}
-fn run_detection(
-    text: String,
-    entities: Vec<String>,
-    rules: Vec<protection::DetectionRule>,
-) -> Result<serde_json::Value, String> {
-    run_detection_with_options(
-        text,
-        entities,
-        rules,
-        protection::DetectionOptions::default(),
-    )
+fn engine_command() -> Command {
+    python_command("veil_engine.bridge")
 }
 
+#[tauri::command]
+async fn detect_pii(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, engine::EngineState>,
+    text: String,
+    entities: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    engine::detect_local(app, state.inner().clone(), text, entities, vec![], Default::default()).await
+}
+
+#[cfg(test)]
+fn detect_default(text: String, entities: Vec<String>) -> Result<serde_json::Value, String> {
+    run_detection_with_options(text, entities, vec![], Default::default())
+}
+
+#[cfg(test)]
 fn run_detection_with_options(
     text: String,
     entities: Vec<String>,
     rules: Vec<protection::DetectionRule>,
     options: protection::DetectionOptions,
 ) -> Result<serde_json::Value, String> {
-    validate_detection_request(&text, &entities)?;
-    options.validate()?;
-
-    let request = serde_json::json!({
-        "text": text,
-        "entities": entities,
-        "rules": rules,
-        "language": options.language,
-        "options": options,
-    });
-
-    let mut child = engine_command()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "Unable to start the Python engine")?;
-    {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or("Unable to communicate with Python")?;
-
-        stdin
-            .write_all(request.to_string().as_bytes())
-            .map_err(|_| "Unable to send detection request")?;
-    }
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Unable to read the detection response")?;
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout
-            .take(16_000_001)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            result => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(if result.is_err() {
-                    "The local detection engine stopped unexpectedly"
-                } else {
-                    "Detection exceeded three minutes. Split the document into smaller files."
-                });
-            }
-        }
-    };
-    let output = reader
-        .join()
-        .map_err(|_| "Unable to read detection results")?
-        .map_err(|_| "Unable to read detection results")?;
-    if !status?.success() {
-        return Err("PII detection failed".into());
-    }
-    if output.len() > 16_000_000 {
-        return Err(
-            "The document contains too many detections. Split it into smaller files.".into(),
-        );
-    }
-    let response: serde_json::Value =
-        serde_json::from_slice(&output).map_err(|_| "Invalid response from Python engine")?;
-    if let Some(message) = response
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(|message| message.as_str())
-    {
-        return Err(message.into());
-    }
-    Ok(response)
+    let root = tempfile::tempdir().map_err(|_| "Unable to prepare an isolated engine")?;
+    engine::EngineState::default().detect(root.path(), text, entities, rules, options)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -163,7 +91,12 @@ pub fn run() {
         .manage(protection::VaultState::default())
         .manage(documents::DroppedDocuments::default())
         .manage(docx::DocxState::default())
+        .manage(engine::EngineState::default())
         .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) && window.label() == "main" {
+                let _ = engine::cancel_model_download(window.state::<engine::EngineState>());
+                let _ = engine::cancel_detection(window.state::<engine::EngineState>());
+            }
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 window
                     .state::<documents::DroppedDocuments>()
@@ -173,6 +106,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             detect_pii,
+            engine::cancel_detection,
+            engine::engine_configuration,
+            engine::import_engine_file,
+            engine::export_engine_profile,
+            engine::start_model_download,
+            engine::cancel_model_download,
+            engine::model_download_status,
             protection::set_vault_protection,
             protection::save_detection_rules,
             protection::list_detection_rules,
@@ -320,7 +260,7 @@ mod detection_review_flow_tests {
     fn reviews_only_the_second_occurrence_of_a_detected_email() {
         let email = "mira@example.com";
         let text = format!("\u{1f600} Send to {email} or copy {email} for review.");
-        let result = detect_pii(text.clone(), vec!["EMAIL_ADDRESS".into()]).unwrap();
+        let result = detect_default(text.clone(), vec!["EMAIL_ADDRESS".into()]).unwrap();
         let hits = result["detections"].as_array().unwrap();
         assert_eq!(hits.len(), 2);
 

@@ -1,0 +1,7 @@
+SUPPORTED_ENTITIES = {
+    "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "LOCATION", "ORGANIZATION",
+    "STREET_ADDRESS", "POSTAL_CODE", "DATE_TIME", "CREDIT_CARD", "IBAN_CODE",
+    "IP_ADDRESS", "URL", "ID_NUMBER", "INDIRECT_IDENTIFIER",
+}
+
+LANGUAGES = {"en": "English", "fr": "French", "es": "Spanish", "ar": "Arabic"}

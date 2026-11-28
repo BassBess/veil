@@ -517,7 +517,7 @@ fn category_catalog_matches_python_typescript_and_sql() {
         .map(|(code, prefix)| (code.to_string(), prefix.to_string()))
         .collect();
     assert_eq!(sql, expected);
-    let python = include_str!("../../../../../engines/python/veil_engine/detector.py");
+    let python = include_str!("../../../../../engines/python/veil_engine/catalog.py");
     let block = python
         .split("SUPPORTED_ENTITIES = {")
         .nth(1)

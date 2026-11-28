@@ -1,5 +1,6 @@
 """Local-only language adapters. Model installation is a separate setup action."""
 from pathlib import Path
+from veil_engine.catalog import LANGUAGES
 import spacy
 import phonenumbers
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
@@ -9,7 +10,6 @@ from presidio_analyzer.predefined_recognizers import (
     PhoneRecognizer, UrlRecognizer,
 )
 
-LANGUAGES = {"en": "English", "fr": "French", "es": "Spanish", "ar": "Arabic"}
 SPACY_MODELS = {"en": "en_core_web_sm", "fr": "fr_core_news_sm", "es": "es_core_news_sm"}
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models" / "stanza"
 ARABIC_PROCESSORS = {"tokenize": "padt", "mwt": "padt", "ner": "aqmar_nocharlm"}
@@ -25,17 +25,35 @@ class ModelUnavailable(ValueError):
     pass
 
 
-def load_language(language, email_recognizer):
+def require_legacy_language(language):
+    if language == "ar":
+        from importlib.util import find_spec
+        if find_spec("stanza") is None:
+            raise ModelUnavailable("Arabic detection dependencies are missing. Run the multilingual model setup described in docs/multilingual-detection.md.")
+        paths = [MODEL_DIR / "resources.json", MODEL_DIR / "ar/pretrain/fasttextwiki.pt"]
+        paths += [MODEL_DIR / "ar" / processor / f"{package}.pt"
+                  for processor, package in ARABIC_PROCESSORS.items()]
+        if not all(path.is_file() for path in paths):
+            raise ModelUnavailable("The local Arabic model is missing. Run python -m veil_engine.setup_models --languages ar from engines/python.")
+    elif not spacy.util.is_package(SPACY_MODELS[language]):
+        model = SPACY_MODELS[language]
+        raise ModelUnavailable(f"The local {LANGUAGES[language]} model ({model}) is missing. Run python -m veil_engine.setup_models --languages {language} from engines/python.")
+
+
+def load_language(language, email_recognizer, *, legacy_nlp=True):
     if language not in LANGUAGES:
         raise ValueError("Choose English, French, Spanish, or Arabic.")
+    if legacy_nlp:
+        require_legacy_language(language)
     arabic = None
-    if language == "ar":
+    if not legacy_nlp:
+        engine = SpacyNlpEngine(models=[{"lang_code": language, "model_name": "local-tokenizer"}])
+        engine.nlp = {language: spacy.blank(language)}
+    elif language == "ar":
         try:
             import stanza
         except ImportError:
             raise ModelUnavailable("Arabic detection dependencies are missing. Run the multilingual model setup described in docs/multilingual-detection.md.") from None
-        if not all(path.is_file() for path in [MODEL_DIR / "resources.json", *(MODEL_DIR / "ar" / processor / f"{package}.pt" for processor, package in ARABIC_PROCESSORS.items()), MODEL_DIR / "ar/pretrain/fasttextwiki.pt"]):
-            raise ModelUnavailable("The local Arabic model is missing. Run python -m veil_engine.setup_models --languages ar from engines/python.")
         try:
             arabic = stanza.Pipeline("ar", dir=str(MODEL_DIR), processors=ARABIC_PROCESSORS,
                                      package=None, download_method=None, use_gpu=False, verbose=False)
@@ -46,13 +64,12 @@ def load_language(language, email_recognizer):
         engine.nlp = {"ar": spacy.blank("ar")}
     else:
         model = SPACY_MODELS[language]
-        if not spacy.util.is_package(model):
-            raise ModelUnavailable(f"The local {LANGUAGES[language]} model ({model}) is missing. Run python -m veil_engine.setup_models --languages {language} from engines/python.")
         engine = SpacyNlpEngine(models=[{"lang_code": language, "model_name": model}])
         engine.nlp = {language: spacy.load(model)}
     context = CONTEXT[language]
     registry = RecognizerRegistry(supported_languages=[language])
-    registry.add_nlp_recognizer(nlp_engine=engine)
+    if legacy_nlp:
+        registry.add_nlp_recognizer(nlp_engine=engine)
     for recognizer in [
         email_recognizer(supported_language=language, context=context["email"]),
         PhoneRecognizer(supported_language=language, context=context["phone"],

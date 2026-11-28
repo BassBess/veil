@@ -351,7 +351,7 @@ mod tests {
         let document = parse_path(&file.0).unwrap();
         assert_eq!(document.file_type, "txt");
         assert!(document.file_name.contains("مستند"));
-        let result = super::super::detect_pii(document.text, vec!["EMAIL_ADDRESS".into()]).unwrap();
+        let result = super::super::detect_default(document.text, vec!["EMAIL_ADDRESS".into()]).unwrap();
         assert!(
             result["detections"]
                 .as_array()

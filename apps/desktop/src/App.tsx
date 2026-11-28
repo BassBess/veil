@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
+import { EnginePanel, type EngineStatus } from "./EnginePanel";
 import { rebaseDetections } from "./rebaseDetections";
 import { applyReviewDecision, groupDetections, matchKey, prepareProcessing } from "./reviewActions";
 
@@ -155,6 +156,22 @@ function App() {
 
 
   const [workspaceView, setWorkspaceView] = useState("Anonymize");
+  const [engineBusy, setEngineBusy] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [cancellingDetection, setCancellingDetection] = useState(false);
+  const [activeProfile, setActiveProfile] = useState("");
+  const [activeCustomCategories, setActiveCustomCategories] = useState<string[]>([]);
+  const [excludedCustomCategories, setExcludedCustomCategories] = useState<string[]>([]);
+  const customCategories = workspaceView === "Anonymize" ? activeCustomCategories : [];
+  const documentCategories = [...PRIVACY_CATEGORIES, ...customCategories.map(value => ({
+    value, label: value.slice(7).split("_").map(word => word[0] + word.slice(1).toLowerCase()).join(" "),
+  }))];
+  const documentView = workspaceView === "Anonymize" || workspaceView === "Pseudonymize";
+  const updateEngineStatus = useCallback((status: EngineStatus) => {
+    setActiveProfile(status.profiles.find(profile => profile.id === status.active_profile)?.name ?? "");
+    setActiveCustomCategories(status.custom_categories);
+  }, []);
+  useEffect(() => { void invoke<EngineStatus>("engine_configuration", { action: "status" }).then(updateEngineStatus).catch(() => {}); }, [updateEngineStatus]);
   const [reviewQuery, setReviewQuery] = useState("");
   const [reviewFilter, setReviewFilter] = useState("all");
   const [reviewCategory, setReviewCategory] = useState("all");
@@ -199,6 +216,8 @@ function App() {
     } catch { /* Use defaults when local preferences are unavailable. */ }
     return PRIVACY_CATEGORIES.slice(0, 5).map((category) => category.value);
   });
+
+  const detectionEntities = [...selectedEntities, ...customCategories.filter(category => !excludedCustomCategories.includes(category))];
 
   useEffect(() => {
     try { localStorage.setItem("veil.detectionCategories", JSON.stringify(selectedEntities)); }
@@ -461,7 +480,7 @@ function App() {
     }
     if (payload.type === "drop") {
       setDragging(false);
-      if (!inside || loading || workspaceView === "Vault" || workspaceView === "Settings") return;
+      if (!inside || loading || !documentView) return;
       if (payload.paths?.length !== 1) { setImportError("Drop one document at a time."); return; }
       void uploadDocument(payload.paths[0]);
     }
@@ -598,7 +617,7 @@ function App() {
     setDetections([]); setAnalyzed(false); setProcessed(null); setValidation(null);
     setSuppressed([]); setEditingId(null); setManualSelection(null);
     setError(""); setReviewError(""); setReviewNotice(""); setDocumentEdited(false);
-    setReviewPage(0);
+    setReviewPage(0); setReviewCategory("all"); setManualCategory("PERSON");
   }
 
   function toggleEntity(entity: string) {
@@ -607,6 +626,10 @@ function App() {
     }
 
     invalidateDetectionReview();
+    if (entity.startsWith("CUSTOM_")) {
+      setExcludedCustomCategories(current => current.includes(entity) ? current.filter(value => value !== entity) : [...current, entity]);
+      return;
+    }
     setSelectedEntities((current) =>
       current.includes(entity)
         ? current.filter((item) => item !== entity)
@@ -807,11 +830,13 @@ function App() {
   }
 
   async function detectPII() {
-    if (loading || !text.trim() || textBytes > 500_000 || selectedEntities.length === 0) {
+    if (loading || !text.trim() || textBytes > 500_000 || detectionEntities.length === 0) {
       return;
     }
 
     setLoading(true);
+    setDetecting(true);
+    setCancellingDetection(false);
     setError("");
     setValidation(null);
     setReviewError(""); setReviewNotice("");
@@ -827,7 +852,7 @@ function App() {
     try {
       const response = await invoke<DetectionResponse>("detect_with_rules", { projectId,
         text,
-        entities: selectedEntities,
+        entities: detectionEntities,
         options: {
           language: documentLanguage,
         },
@@ -848,9 +873,15 @@ function App() {
       setError(String(err));
     } finally {
       setLoading(false);
+      setDetecting(false);
     }
   }
 
+
+  function cancelDetection() {
+    setCancellingDetection(true);
+    void invoke("cancel_detection").catch(error => { setError(String(error)); setCancellingDetection(false); });
+  }
 
   async function validateAcceptedDetections(includePending = false) {
     if (loading || processingInFlight.current || !analyzed || editingId !== null) return;
@@ -915,9 +946,12 @@ function App() {
           <span>VEIL</span>
         </div>
         <nav aria-label="Main navigation">
-          {["Anonymize", "Pseudonymize", "Vault", "Settings"].map((view) => (
-            <button key={view} disabled={loading || vaultBusy} className={`nav-item ${workspaceView === view ? "active" : ""}`} aria-current={workspaceView === view ? "page" : undefined} onClick={() => { setWorkspaceView(view); void refreshVault(); setRestoredText(null); setVaultError(""); setExportMessage(""); }}>
-              <Icon name={view === "Vault" ? "vault" : view === "Settings" ? "settings" : view === "Pseudonymize" ? "database" : "home"} />{view}
+          {["Anonymize", "Pseudonymize", "Vault", "Model Library", "Profiles", "Settings"].map((view) => (
+            <button key={view} disabled={loading || vaultBusy || engineBusy} className={`nav-item ${workspaceView === view ? "active" : ""}`} aria-current={workspaceView === view ? "page" : undefined} onClick={() => {
+              if (view === "Pseudonymize" && ([...detections, ...suppressed].some(item => item.entity_type.startsWith("CUSTOM_"))
+                  || manualCategory.startsWith("CUSTOM_") || reviewCategory.startsWith("CUSTOM_"))) invalidateDetectionReview();
+              setWorkspaceView(view); void refreshVault(); setRestoredText(null); setVaultError(""); setExportMessage(""); }}>
+              <Icon name={view === "Vault" ? "vault" : view === "Settings" ? "settings" : view === "Model Library" ? "folder" : view === "Profiles" ? "document" : view === "Pseudonymize" ? "database" : "home"} />{view}
             </button>
           ))}
         </nav>
@@ -928,10 +962,10 @@ function App() {
       <main className={`workspace ${workspaceView === "Vault" && vaultStatus.unlocked ? "vault-workspace" : ""}`}>
         <header className="intro" hidden={workspaceView === "Vault" && vaultStatus.unlocked}>
           <h1>{workspaceView === "Anonymize" ? "Anonymization workspace" : workspaceView === "Pseudonymize" ? "Pseudonymization workspace" : workspaceView}</h1>
-          <p>{workspaceView === "Vault" ? "Your saved people, pseudonyms, and processed documents." : workspaceView === "Settings" ? "Manage your detection preferences." : "Inspect your documents and review sensitive information before sharing."}</p>
+          <p>{workspaceView === "Vault" ? "Your saved people, pseudonyms, and processed documents." : workspaceView === "Settings" ? "Manage your detection preferences." : workspaceView === "Model Library" ? "Install and inspect models for local inference." : workspaceView === "Profiles" ? "Configure which models and algorithms run during detection." : "Inspect your documents and review sensitive information before sharing."}</p>
         </header>
 
-        {vaultStatus.unlocked && workspaceView !== "Anonymize" && workspaceView !== "Vault" && <section className="project-toolbar" aria-label="Project">
+        {vaultStatus.unlocked && (workspaceView === "Pseudonymize" || workspaceView === "Settings") && <section className="project-toolbar" aria-label="Project">
           <label>Project<select value={projectId} disabled={loading || vaultBusy || importing} onChange={(event) => selectProject(event.target.value)}>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name} · {project.documents} documents · {project.identities} identities</option>)}
           </select></label>
@@ -1070,7 +1104,10 @@ function App() {
           </>}
 
         </section>}
-        <div hidden={workspaceView === "Vault" || workspaceView === "Settings"}>
+        {(workspaceView === "Model Library" || workspaceView === "Profiles") && <EnginePanel
+          view={workspaceView} busy={engineBusy} onBusy={setEngineBusy}
+          onProfileChanged={invalidateDetectionReview} onStatus={updateEngineStatus} />}
+        <div hidden={!documentView}>
         <div className={`mode-indicator ${workspaceView === "Pseudonymize" ? "pseudonymize-mode" : ""}`} role="status" aria-live="polite">
           <Icon name={workspaceView === "Pseudonymize" ? "database" : "home"} />
           <div><strong>{workspaceView === "Pseudonymize" ? "Pseudonymization" : "Anonymization"}</strong>
@@ -1145,25 +1182,31 @@ function App() {
             </div>
           )}
           <p className="detection-help">Models run locally. Phone detection checks all supported regions automatically. Scores are recognizer signals, not probabilities. Automatic indirect-description suggestions currently cover English; use custom phrases for other languages.</p>
+          {activeProfile && <p className="detection-help">Active profile · {activeProfile}</p>}
+          {workspaceView === "Pseudonymize" && activeCustomCategories.length > 0 &&
+            <p className="detection-help">Custom categories are available in Anonymize.</p>}
           <div className="detect-toolbar">
             <label className="document-language">Document language<select aria-label="Document language" disabled={loading} value={documentLanguage} onChange={event => { setDocumentLanguage(event.target.value); invalidateDetectionReview(); }}>
               <option value="en">English</option><option value="fr">Français</option><option value="es">Español</option><option value="ar">العربية</option>
             </select></label>
-            <details className="category-picker"><summary>Data categories ({selectedEntities.length})</summary>
+            <details className="category-picker"><summary>Data categories ({detectionEntities.length})</summary>
             <div className="privacy-categories">
-              {PRIVACY_CATEGORIES.map((category) => (
+              {documentCategories.map((category) => (
                 <label key={category.value} className="privacy-category">
-                  <input type="checkbox" disabled={loading} checked={selectedEntities.includes(category.value)} onChange={() => toggleEntity(category.value)} />
+                  <input type="checkbox" disabled={loading} checked={detectionEntities.includes(category.value)} onChange={() => toggleEntity(category.value)} />
                   <span>{category.label}</span>
                 </label>
               ))}
             </div></details>
-            <button className="primary detect-button" onClick={detectPII} disabled={loading || !text.trim() || textBytes > 500_000 || selectedEntities.length === 0}>
-              {!importing && loading && !analyzed ? "Detecting…" : "Detect"}<Icon name="arrow" />
+            <button className="primary detect-button" onClick={detectPII} disabled={loading || !text.trim() || textBytes > 500_000 || detectionEntities.length === 0}>
+              {detecting ? "Detecting…" : "Detect"}<Icon name="arrow" />
             </button>
           </div>
+          {detecting && <button className="secondary-button" disabled={cancellingDetection} onClick={cancelDetection}>
+            {cancellingDetection ? "Cancelling…" : "Cancel detection"}
+          </button>}
           {textBytes > 500_000 && <div className="error" role="alert">Text exceeds 500,000 UTF-8 bytes. Split the document before detection.</div>}
-          {selectedEntities.length === 0 && <div className="error" role="alert">Select at least one sensitive data category.</div>}
+          {detectionEntities.length === 0 && <div className="error" role="alert">Select at least one sensitive data category.</div>}
           {error && <div className="error" role="alert">Detection failed: {error}</div>}
         </section>
 
@@ -1183,7 +1226,7 @@ function App() {
               <option value="rejected">Rejected</option>
             </select>
             <select aria-label="Filter detection category" value={reviewCategory} onChange={event => { setReviewCategory(event.target.value); setReviewPage(0); }}>
-              <option value="all">All categories</option>{PRIVACY_CATEGORIES.map(category => <option key={category.value} value={category.value}>{category.label}</option>)}
+              <option value="all">All categories</option>{documentCategories.map(category => <option key={category.value} value={category.value}>{category.label}</option>)}
             </select>
             <button className="secondary-button" disabled={!reviewQuery && reviewFilter === "all" && reviewCategory === "all"} onClick={() => { setReviewQuery(""); setReviewFilter("all"); setReviewCategory("all"); setReviewPage(0); }}>Clear filters</button>
           </div>
@@ -1196,7 +1239,7 @@ function App() {
             <label className="repeat-choice"><input type="checkbox" checked={linkRepeated} disabled={loading || editingId !== null} onChange={event => setLinkRepeated(event.target.checked)} />Apply individual accept/reject decisions to repeated matches</label>
             <p>Matches use the same text and category. Accepting a match also finds other exact occurrences; previously rejected occurrences and overlapping detections stay unchanged. Turn this off to decide one occurrence at a time.</p>
           </div>}
-          {suppressed.length > 0 && <details className="suppressed-results"><summary>{suppressed.length} suggestions excluded during detection</summary><p>Excluded suggestions will stay unchanged. Select text in the document to add an item manually if needed.</p><ul>{suppressed.map((item, index) => <li key={index}><bdi>{item.text}</bdi> · {PRIVACY_CATEGORIES.find(category => category.value === item.entity_type)?.label} · {item.reason}</li>)}</ul></details>}
+          {suppressed.length > 0 && <details className="suppressed-results"><summary>{suppressed.length} suggestions excluded during detection</summary><p>Excluded suggestions will stay unchanged. Select text in the document to add an item manually if needed.</p><ul>{suppressed.map((item, index) => <li key={index}><bdi>{item.text}</bdi> · {documentCategories.find(category => category.value === item.entity_type)?.label} · {item.reason}</li>)}</ul></details>}
           {reviewNotice && <p className="review-notice" role="status">{reviewNotice}</p>}
           {detections.length > 0 && filteredDetections.length === 0 && <p role="status" className="selection-hint">No detections match these filters.</p>}
           {detections.length === 0 ? (
@@ -1211,7 +1254,7 @@ function App() {
                     return group.length > 1 && <button className="repeat-count occurrence-button" disabled={loading || editingId !== null} onClick={() => nextOccurrence(item)} title="Show next occurrence in document">{group.length} matches · {group.findIndex(hit => hit.id === item.id) + 1}/{group.length} ↗</button>;
                   })()}<span className="review-status">{item.needsCorrection && item.status !== "rejected" ? "Text removed — edit or reject" : item.status === "pending" ? "Pending review" : item.status === "rejected" ? "Rejected" : "Accepted"}</span></div>
                   <select aria-label={`Category for ${item.text}`} value={item.entity_type} disabled={loading || editingId !== null} onChange={(event) => updateDetectionCategory(item.id, event.target.value)}>
-                    {PRIVACY_CATEGORIES.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}
+                    {documentCategories.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}
                   </select>
                   <span className="confidence">{item.confidence === null ? "Manual" : `${(item.confidence * 100).toFixed(0)}%`}</span>
                   <div className="row-actions">
@@ -1234,7 +1277,7 @@ function App() {
           {analyzed && manualSelection && !editingId && (
             <div className="manual-detection">
               <p>Selected text: <strong>{manualSelection.text}</strong></p>
-              <label>Category <select value={manualCategory} disabled={loading} onChange={(event) => { setManualCategory(event.target.value); setManualError(""); }}>{PRIVACY_CATEGORIES.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select></label>
+              <label>Category <select value={manualCategory} disabled={loading} onChange={(event) => { setManualCategory(event.target.value); setManualError(""); }}>{documentCategories.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select></label>
               <button className="primary" onClick={addManualDetection} disabled={loading}>Add information<Icon name="plus" /></button>
               {manualError && <div className="error" role="alert">{manualError}</div>}
             </div>

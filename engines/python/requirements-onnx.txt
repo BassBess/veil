@@ -1,0 +1,6 @@
+# Optional local CPU inference. Install explicitly in the existing engine venv.
+onnx==1.23.2
+onnxruntime==1.32.0
+tokenizers==0.23.3
+# Keep the ONNX environment compatible with the existing Presidio range.
+numpy>=1.23.2,<2.5
