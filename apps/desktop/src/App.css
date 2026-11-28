@@ -1003,3 +1003,52 @@ textarea:focus { background: white; }
 @media (min-width: 1550px) { .workspace.vault-workspace { padding: 32px; } .vault-layout { grid-template-columns: 330px minmax(0,1fr); gap: 24px; } .vault-panel { padding: 30px; } }
 @media (max-width: 1120px) { .vault-layout { grid-template-columns: 235px minmax(0,1fr); gap: 16px; } .vault-panel { padding: 20px; } .vault-tabs { gap: 8px; } .vault-tabs button { gap: 7px; font-size: 12px; } .vault-panel-header { gap: 12px; } .vault-project-select select { max-width: 210px; } }
 @media (max-width: 850px) { .workspace.vault-workspace { padding: 20px 16px; } .vault-layout { grid-template-columns: minmax(0,1fr); } .projects-panel { padding: 20px; } .project-list { max-height: 215px; } .vault-panel { min-height: 0; } .vault-panel-title .vault-mark { width: 36px; height: 40px; } .vault-tabs { gap: 5px; } .vault-tabs button { padding-inline: 6px; } }
+
+.engine-panel > h2 { margin: 26px 0 12px; }
+.engine-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.engine-actions span, .engine-item span { color: #5c738a; font-size: 13px; }
+.engine-download { margin: 16px 0 12px; }
+.engine-download button { min-height: 44px; }
+.engine-download-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: #365775; font-size: 14px; }
+.engine-download-status progress { accent-color: #315f87; }
+.engine-item { margin: 8px 0; padding: 14px 16px; border: 1px solid #d4e1ec; border-radius: 7px; }
+.engine-item > summary { cursor: pointer; color: #233f5b; }
+.engine-item > summary span { margin-left: 12px; }
+.model-metadata { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 18px; margin: 18px 0; font-size: 14px; }
+.model-metadata dt { color: #5c738a; }
+.model-metadata dd { margin: 0; overflow-wrap: anywhere; }
+.engine-file-list { margin: 0 0 16px; font-size: 13px; color: #3c5a74; }
+.engine-file-list summary { cursor: pointer; }
+.engine-file-list code { display: block; overflow-wrap: anywhere; }
+.active-engine-profile strong { margin-right: 10px; color: #233f5b; }
+.profile-form h2 { margin: 0 0 12px; }
+.profile-form fieldset { padding: 0; border: 0; min-width: 0; margin: 0 0 12px; }
+.profile-form legend { color: #223f5b; margin-bottom: 6px; font-weight: 600; }
+.profile-form .engine-option { display: inline-flex; align-items: center; gap: 8px; margin-right: 16px; }
+.profile-form input[type=text], .profile-form input:not([type]), .profile-form input[type=number] {
+  display: block; font: inherit; margin: 6px 0 0; border: 1px solid #afc4d6; background: white; color: #294a69; border-radius: 4px; padding: 8px;
+}
+.profile-form input[type=checkbox] { accent-color: #254e72; }
+.engine-budget { display: flex; flex-wrap: wrap; gap: 14px; }
+.profile-item { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.profile-item strong, .profile-item span { display: block; }
+.run-metrics { overflow-x: auto; }
+.run-metrics table { margin-top: 12px; text-align: left; font-size: 13px; border-collapse: collapse; }
+.run-metrics :is(th, td) { padding: 6px 12px 6px 0; border-bottom: 1px solid #dae5ef; }
+.sidebar .nav-item { white-space: nowrap; }
+
+.label-editor h3 { margin: 0 0 12px; }
+.label-editor fieldset { border: 0; padding: 0; min-width: 0; }
+.label-editor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin: 12px 0 22px; }
+.label-editor-row { border: 1px solid #d4e1ec; border-radius: 6px; padding: 10px; }
+.label-editor-row label { margin: 0 0 6px; }
+.label-editor-row select, .label-editor-row input {
+  display: block; font: inherit; width: 100%; margin: 5px 0 0;
+  border: 1px solid #afc4d6; border-radius: 4px; padding: 7px; background: white; color: #294a69;
+}
+.label-editor > fieldset > .engine-actions { margin-bottom: 16px; }
+.label-editor-row small { display: block; color: #526680; overflow-wrap: anywhere; }
+.label-reset-changes { overflow-x: auto; margin: 10px 0 18px; }
+.label-reset-changes table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
+.label-reset-changes :is(th, td) { padding: 8px; border-bottom: 1px solid #d4e1ec; overflow-wrap: anywhere; }
+.label-reset-changes small { display: block; color: #526680; font-weight: normal; }

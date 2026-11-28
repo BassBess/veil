@@ -41,26 +41,11 @@ def main():
                 json.dump({"error": {"code": error.code, "message": str(error)}}, sys.stdout)
             return
 
-        from veil_engine.detector import VeilDetector
-        text = request["text"]
-        entities = request.get("entities")
-
-        detector = VeilDetector(request.get("language", "en"))
-
-        results = detector.suggest(
-            text,
-            entities,
-            request.get("rules"),
-            request.get("options"),
-        )
-
-        json.dump(
-            {
-                "detections": results,
-                "suppressed": detector.suppressed
-            },
-            sys.stdout,
-        )
+        from veil_engine.pipeline import run_detection
+        from veil_engine.service import offline
+        offline()
+        json.dump(run_detection(request["text"], request.get("entities"), request.get("language", "en"),
+                                request.get("rules"), request.get("options")), sys.stdout)
 
     except ValueError as error:
         # These errors contain validated setup/rule messages, never document text.

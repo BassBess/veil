@@ -14,6 +14,19 @@ pub(crate) fn supported_entity(entity_type: &str) -> bool {
     crate::protection::category_prefix(entity_type).is_some()
 }
 
+
+pub(crate) fn custom_entity(entity_type: &str) -> bool {
+    let Some(code) = entity_type.strip_prefix("CUSTOM_") else {
+        return false;
+    };
+    code.len() <= 32
+        && code.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+        && code.split('_').all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        })
+}
+
 #[tauri::command]
 pub fn validate_reviewed_detections(
     text: String,
@@ -39,7 +52,7 @@ pub(crate) fn validate_spans(
             return Err("Invalid or duplicate detection ID".into());
         }
 
-        if !supported_entity(&entity.entity_type) {
+        if !supported_entity(&entity.entity_type) && !custom_entity(&entity.entity_type) {
             return Err("Unsupported entity category".into());
         }
 

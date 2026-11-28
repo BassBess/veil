@@ -1,4 +1,5 @@
-from bisect import bisect_left
+from veil_engine.catalog import SUPPORTED_ENTITIES
+from veil_engine.components import ExactFusion, VeilRanking, select_nonoverlapping
 from veil_engine.languages import load_language, arabic_entities
 from veil_engine.detection_options import validate_options, filter_candidates
 from veil_engine.context_rules import suggestions
@@ -15,22 +16,16 @@ class OfflineEmailRecognizer(EmailRecognizer):
 
 
 class VeilDetector:
-    SUPPORTED_ENTITIES = {
-        "PERSON",
-        "EMAIL_ADDRESS",
-        "PHONE_NUMBER",
-        "LOCATION",
-        "ORGANIZATION",
-        "STREET_ADDRESS", "POSTAL_CODE", "DATE_TIME", "CREDIT_CARD", "IBAN_CODE",
-        "IP_ADDRESS", "URL", "ID_NUMBER", "INDIRECT_IDENTIFIER",
-    }
+    SUPPORTED_ENTITIES = SUPPORTED_ENTITIES
 
     language = "en"
     arabic = None
+    legacy_nlp = True
 
-    def __init__(self, language="en"):
+    def __init__(self, language="en", *, legacy_nlp=True):
         self.language = language
-        self.analyzer, self.arabic = load_language(language, OfflineEmailRecognizer)
+        self.legacy_nlp = legacy_nlp
+        self.analyzer, self.arabic = load_language(language, OfflineEmailRecognizer, legacy_nlp=legacy_nlp)
 
     def detect(
         self,
@@ -95,7 +90,7 @@ class VeilDetector:
         ]
 
         doc = None
-        if enabled & {"ORGANIZATION", "INDIRECT_IDENTIFIER"}:
+        if self.legacy_nlp and enabled & {"ORGANIZATION", "INDIRECT_IDENTIFIER"}:
             doc = self.analyzer.nlp_engine.process_text(text, self.language).tokens
         return detected + arabic_entities(self.arabic, text, enabled) + suggestions(text, enabled, rules, doc, self.language)
 
@@ -109,30 +104,5 @@ class VeilDetector:
 
         options = {**validate_options(options, self.SUPPORTED_ENTITIES), "language": self.language}
         candidates = self.detect(text, entities, (rules or []) + options.get("session_rules", []))
-        unique = {}
-        for item in candidates:
-            key = (item["entity_type"], item["start"], item["end"])
-            if key not in unique or item["confidence"] > unique[key]["confidence"]:
-                unique[key] = item
-        candidates, self.suppressed = filter_candidates(text, list(unique.values()), options)
-
-        ranked = sorted(
-            candidates,
-            key=lambda item: (
-                item["entity_type"] in {"STREET_ADDRESS", "POSTAL_CODE", "INDIRECT_IDENTIFIER"},
-                item["confidence"],
-                item["end"] - item["start"],
-            ),
-            reverse=True,
-        )
-
-        selected = []
-        starts = []
-        for candidate in ranked:
-            position = bisect_left(starts, candidate["start"])
-            before = position > 0 and selected[position - 1]["end"] > candidate["start"]
-            after = position < len(selected) and selected[position]["start"] < candidate["end"]
-            if not before and not after:
-                starts.insert(position, candidate["start"])
-                selected.insert(position, candidate)
-        return selected
+        candidates, self.suppressed = filter_candidates(text, ExactFusion().fuse(candidates), options)
+        return select_nonoverlapping(VeilRanking().rank(candidates))

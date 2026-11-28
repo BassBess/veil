@@ -59,6 +59,18 @@ Windows also needs Microsoft Edge WebView2 Runtime, which is normally already in
 
 Early development — Phase 1
 
+## Model Library and Profiles
+
+Install optional models from local files, Veil bundles, or public Hugging Face repositories.
+Create a detection profile to choose its languages, components, and inference limits.
+Model installation is explicit and detection runs locally.
+See the [engine guide](docs/modular-privacy-engine.md) for setup and adapter development.
+
+## NixOS desktop development
+
+`nix develop` exposes the GTK and desktop GSettings schemas used by the native file dialogs.
+On machines with WebKit rendering issues, use `nix develop .#nixos-x11` to select GTK's X11 backend and disable WebKit's dma-buf renderer for the development shell.
+
 ## Multilingual detection
 
 Select English, French, Spanish, or Arabic in **Document language** before
